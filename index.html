@@ -1587,28 +1587,42 @@ async function runAI(){
   try{
     const prompt=buildAIPrompt();
 
-    // Try local server first
+    // ── Llama al Cloudflare Worker (o servidor local como fallback)
     let raw='';
-    let usedServer=false;
-    try{
-      const res=await fetch('http://localhost:8765/api/analyze',{
+    // ══════════════════════════════════════════════════════
+    //  CONFIGURA AQUÍ TU URL DEL CLOUDFLARE WORKER
+    //  Ejemplo: 'https://analizador-contable.tucuenta.workers.dev/api/analyze'
+    // ══════════════════════════════════════════════════════
+    const WORKER_URL = 'https://black-brook-26ccanalizador.worldgncolombia.workers.dev/';
+    const LOCAL_URL  = 'http://localhost:8765/api/analyze';
+
+    const tryFetch=async(url)=>{
+      const res=await fetch(url,{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({prompt}),
         signal:AbortSignal.timeout(60000)
       });
       if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error||`HTTP ${res.status}`);}
-      const data=await res.json();
+      return res.json();
+    };
+
+    try{
+      // Intenta Worker primero, luego servidor local como fallback
+      let data;
+      if(!WORKER_URL.includes('REEMPLAZAR')){
+        data=await tryFetch(WORKER_URL);
+      } else {
+        data=await tryFetch(LOCAL_URL);
+      }
       raw=data.text||'';
-      usedServer=true;
-    }catch(serverErr){
-      // Server not available — show send-to-chat fallback
-      showChatFallback(prompt, serverErr.message);
+    }catch(err){
+      showChatFallback(prompt, err.message);
       btn.disabled=false;
       return;
     }
 
-    renderAIResult(body, raw, usedServer);
+    renderAIResult(body, raw);
   }catch(err){
     body.innerHTML=`<div class="ai-error-box">
       <strong>Error al generar el análisis</strong>
@@ -1619,7 +1633,7 @@ async function runAI(){
   btn.disabled=false;
 }
 
-function renderAIResult(body, raw, usedServer){
+function renderAIResult(body, raw){
   let parsed=null;
   try{parsed=JSON.parse(raw.replace(/```json|```/g,'').trim());}catch(e){}
 
@@ -1651,18 +1665,28 @@ function renderAIResult(body, raw, usedServer){
 
 function showChatFallback(prompt, errorMsg){
   const body=document.getElementById('ai-body');
-  const shortPrompt=prompt.substring(0,200)+'...';
+  const isWorkerNotSet=errorMsg.includes('REEMPLAZAR')||errorMsg.includes('Failed to fetch')||errorMsg.includes('NetworkError');
   body.innerHTML=`
     <div style="background:var(--amber-bg);border:1px solid #f5d78a;border-radius:var(--r-lg);padding:1rem;margin-bottom:1rem;">
-      <p style="font-weight:600;color:var(--amber);font-size:13px;margin-bottom:4px;">Servidor local no disponible</p>
+      <p style="font-weight:600;color:var(--amber);font-size:13px;margin-bottom:4px;">No se pudo conectar con el servidor de IA</p>
       <p style="font-size:12px;color:var(--ink2);">${escHtml(errorMsg)}</p>
     </div>
-    <p style="font-size:13px;color:var(--ink2);margin-bottom:1rem;line-height:1.6;">
-      Para usar el análisis IA integrado, ejecute <code>python servidor.py</code> en la carpeta del archivo y abra <code>http://localhost:8765</code>.<br>
-      Alternativamente, puede <strong>enviar el análisis al chat de Claude</strong> haciendo clic abajo:
-    </p>
+    <div style="background:var(--surface2);border-radius:var(--r-lg);padding:1rem;margin-bottom:1rem;">
+      <p style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:10px;">Opciones para activar el análisis IA:</p>
+      <p style="font-size:12px;color:var(--ink2);line-height:1.8;margin-bottom:8px;">
+        <strong>Opción A — Cloudflare Worker (recomendado para GitHub Pages):</strong><br>
+        1. Despliega el archivo <code>worker.js</code> en Cloudflare Workers<br>
+        2. Agrega tu API key como variable de entorno <code>ANTHROPIC_API_KEY</code><br>
+        3. Reemplaza <code>REEMPLAZAR-CON-TU-URL</code> en el HTML con la URL del Worker<br>
+        4. Sube el HTML actualizado a GitHub
+      </p>
+      <p style="font-size:12px;color:var(--ink2);line-height:1.8;">
+        <strong>Opción B — Servidor local:</strong><br>
+        Ejecuta <code>python servidor.py</code> y abre el archivo desde <code>http://localhost:8765</code>
+      </p>
+    </div>
     <button class="ai-run-btn" onclick="sendToChat()" style="margin-right:8px;">Enviar al chat de Claude →</button>
-    <button class="ai-run-btn" onclick="runAI()" style="background:transparent;border:1.5px solid var(--blue);color:var(--blue);">Reintentar servidor</button>`;
+    <button class="ai-run-btn" onclick="runAI()" style="background:transparent;border:1.5px solid var(--blue);color:var(--blue);">Reintentar</button>`;
   window._pendingPrompt=prompt;
 }
 
