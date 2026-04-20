@@ -1638,14 +1638,27 @@ function renderAIResult(body, raw){
   let parsed=null;
   try{
     let clean=raw.trim();
-    // Strip markdown code fences if present
     clean=clean.replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/```\s*$/,'').trim();
-    parsed=JSON.parse(clean);
-  }catch(e){
-    // Try to extract partial JSON
-    const m=raw.match(/\{[\s\S]*/);
-    if(m){try{parsed=JSON.parse(m[0]);}catch(e2){}}
-  }
+    // If JSON is truncated, try to salvage it by closing open structures
+    if(!clean.endsWith('}')){
+      // Close any open arrays and the object
+      const opens=(clean.match(/\[/g)||[]).length-(clean.match(/\]/g)||[]).length;
+      for(let i=0;i<opens;i++) clean+=']';
+      if(!clean.trim().endsWith('}')) clean+='}';
+    }
+    try{ parsed=JSON.parse(clean); }catch(e1){
+      // Last resort: extract fields manually with regex
+      parsed={};
+      const rRes=clean.match(/"resumen"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if(rRes) parsed.resumen=rRes[1].replace(/\\n/g,'\n');
+      const rHall=clean.match(/"hallazgos"\s*:\s*\[((?:[\s\S]*?)(?:\]|$))/);
+      if(rHall){try{parsed.hallazgos=JSON.parse('['+rHall[1].replace(/,?\s*$/,'')+']');}catch(e){parsed.hallazgos=[];}}
+      const rAlert=clean.match(/"alertas"\s*:\s*\[((?:[\s\S]*?)(?:\]|$))/);
+      if(rAlert){try{parsed.alertas=JSON.parse('['+rAlert[1].replace(/,?\s*$/,'')+']');}catch(e){parsed.alertas=[];}}
+      const rRec=clean.match(/"recomendaciones"\s*:\s*\[((?:[\s\S]*?)(?:\]|$))/);
+      if(rRec){try{parsed.recomendaciones=JSON.parse('['+rRec[1].replace(/,?\s*$/,'')+']');}catch(e){parsed.recomendaciones=[];}}
+    }
+  }catch(e){}
 
   if(!parsed||!parsed.resumen){
     body.innerHTML='<pre style="font-size:12px;line-height:1.6;white-space:pre-wrap;color:var(--ink2);">'+escHtml(raw)+'</pre>';
