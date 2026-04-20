@@ -1498,7 +1498,7 @@ function buildAIPrompt(){
   const otrosSig=sig.filter(v=>v.resultado.startsWith('03'));
 
   // ── Project movements (top 25 by absolute variation)
-  const projLines=(_projByPeriod||[]).slice(0,25).map(p=>{
+  const projLines=(_projByPeriod||[]).slice(0,15).map(p=>{
     const st=p.nuevo?'[NUEVO]':p.desap?'[INACTIVO]':Math.abs(p.diff)/1e6<3?'[ESTABLE]':p.diff>=0?'[CRECE]':'[CAE]';
     return`  ${st} ${p.proj}: ${labelA}=${fmtM(p.t1,false)}(fact=${fmtM(p.f1,false)},wip=${fmtM(p.w1,false)}) | ${labelB}=${fmtM(p.t2,false)}(fact=${fmtM(p.f2,false)},wip=${fmtM(p.w2,false)}) | var=${fmtM(p.diff)}(${fmtPct(p.pct)})`;
   }).join('\n');
@@ -1506,12 +1506,12 @@ function buildAIPrompt(){
   // ── Cost drivers with sub-detail
   const subData=_subData||{};
   const costLines=costSig.map(v=>{
-    const subs=(subData[v.key]||[]).slice(0,8).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
+    const subs=(subData[v.key]||[]).slice(0,5).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
     return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${subs}`;
   }).join('\n');
 
   const otrosLines=otrosSig.map(v=>{
-    const subs=(subData[v.key]||[]).slice(0,8).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
+    const subs=(subData[v.key]||[]).slice(0,5).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
     return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${subs}`;
   }).join('\n');
 
@@ -1602,7 +1602,7 @@ async function runAI(){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({prompt}),
-        signal:AbortSignal.timeout(60000)
+        signal:AbortSignal.timeout(90000)
       });
       if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error||`HTTP ${res.status}`);}
       return res.json();
