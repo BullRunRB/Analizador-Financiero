@@ -950,6 +950,10 @@ function run(){
   _state={pA,pB,labelA,labelB,nivel,modo,thM,thP,r1all,r2all,entityCounts,consorcios};
   currentEntity='all';
   currentView='eri';
+  // Clear AI cache when new data is loaded/analyzed
+  _aiResultHTML=null;
+  _aiResultKey=null;
+  window._lastParsed=null;
 
   renderResults();
 }
@@ -1452,8 +1456,19 @@ function toggleNegFilter(){ showOnlyNeg=!showOnlyNeg; renderView(); }
 // ═══════════════════════════════════════════
 // AI VIEW
 // ═══════════════════════════════════════════
+// Store AI result so it persists across tab switches
+let _aiResultHTML = null;
+let _aiResultKey  = null; // key = labelA+labelB+entity to detect when data changes
+
 function buildAI(){
   const{labelA,labelB}=_state;
+  const currentKey=labelA+'|'+labelB+'|'+currentEntity+'|'+currentConsorcio;
+
+  // If result exists for the same analysis, restore it
+  const savedBody = (_aiResultKey===currentKey && _aiResultHTML)
+    ? _aiResultHTML
+    : '<p class="ai-placeholder">Haga clic en "Generar análisis" para obtener el análisis gerencial con IA.</p>';
+
   return `<div class="ai-section">
     <div class="ai-header">
       <div class="ai-header-left">
@@ -1463,11 +1478,12 @@ function buildAI(){
           <div class="ai-header-sub">${labelA} vs ${labelB} · ${currentEntity==='all'?'Consolidado':currentEntity}</div>
         </div>
       </div>
-      <button class="ai-run-btn" id="ai-run-btn" onclick="runAI()">Generar análisis →</button>
+      <div style="display:flex;gap:8px;align-items:center;">
+        ${_aiResultKey===currentKey&&_aiResultHTML?'<button class="ai-run-btn" onclick="runAI()" style="background:rgba(255,255,255,.12);font-size:11px;padding:5px 12px;">↺ Regenerar</button>':''}
+        <button class="ai-run-btn" id="ai-run-btn" onclick="runAI()">${_aiResultKey===currentKey&&_aiResultHTML?'Nuevo análisis →':'Generar análisis →'}</button>
+      </div>
     </div>
-    <div class="ai-body" id="ai-body">
-      <p class="ai-placeholder">Haga clic en "Generar análisis" para obtener un análisis gerencial automático dentro del mismo archivo, sin depender de servidor local.</p>
-    </div>
+    <div class="ai-body" id="ai-body">${savedBody}</div>
   </div>`;
 }
 
@@ -1558,9 +1574,20 @@ function buildAIPrompt(){
   // EXCLUDES: 4-digit corporate cost centers (10xx, 9xxx) — they never have direct income by design
   // EXCLUDES: consortium cecos (1050-1084 range used for consorcios)
   // ONLY flags real project codes (format: ABC99999-999) with costs but no income
+  // Internal consortium project codes in the matrix (costs only, no direct income — normal)
+  const INTERNAL_CONSORTIUM_PROJS=[
+    'AFN23200-100','CDN22200-100','MMN20103-100','MMN21100-100'
+  ];
+
   function isCorporateCeco(ceco){
     // 4-digit code = corporate cost center (1000-9999 pattern: digits + space + dash + name)
-    return /^\d{4}\s*-/.test(ceco);
+    if(/^\d{4}\s*-/.test(ceco)) return true;
+    // Internal consortium projects — costs only by design, not orphans
+    const code=ceco.split(' ')[0];
+    if(INTERNAL_CONSORTIUM_PROJS.includes(code)) return true;
+    // Any project with CONSORCIO in name is an internal consortium project
+    if(ceco.toUpperCase().includes('CONSORCIO')) return true;
+    return false;
   }
 
   function orphanCosts(rows1){
@@ -1709,7 +1736,8 @@ ESTRUCTURA DE CONSOLIDADORES DE COSTOS:
 - PROYECTOS REALES: código alfanumérico 12 caracteres, ej: ELH25100-100, AIR22200-100. Estos SÍ deben tener ingresos asociados. Si tienen costo sin ingreso es una alerta válida.
 - CENTROS DE COSTO CORPORATIVOS (CeCo): código numérico 4 dígitos, ej: 1000 GERENCIA GENERAL, 1018 DIRECCIÓN TRIBUTARIA, 1021 SERVICIOS ADMINISTRATIVOS. Estos NUNCA tienen ingresos directos — acumulan gastos de las áreas que dirigen proyectos. NO son costos huérfanos. Son parte normal de la estructura administrativa.
 - CECOS PROYECTIZADOS: centros de costo corporativos que aparecen dentro de proyectos reales (ej: 1007 Gerencia de Negocios cargado a un proyecto). También normales, no generan alerta.
-- CONSORCIOS: cecos 1047-1084 (PROISES, FAZNI, ADISES, ACISES, BM ISES, ISELTEC, GEOISES). Sus ingresos se registran en rubros 06, 09, 12 — no en rubro 01.
+- CONSORCIOS — CONSOLIDADORES: cecos 1047-1084 (1047 PROISES, 1048 FAZNI, 1050 ADISES, 1051 ACISES, 1052 BM ISES, 1075 ISELTEC, 1084 GEOISES). Sus ingresos se registran en rubros 06, 09, 12 — no en rubro 01. Estos cecos consolidan el % de participación de ISES en el consorcio.
+- PROYECTOS INTERNOS DE CONSORCIO: proyectos alfanuméricos en la MATRIZ que acumulan costos/gastos de empleados ISES que trabajan para un consorcio. Ejemplos: AFN23200-100 CONSORCIO BMISES, CDN22200-100 CONSORCIO ADISES, MMN20103-100 CONSORCIO PROISES, MMN21100-100 CONSORCIO FAZNI PI. IMPORTANTE: estos proyectos tienen costos al 100% (empleados y gastos de la matriz trabajando para el consorcio) pero NO tienen ingresos directos en la matriz — los ingresos están en el ceco consolidador del consorcio (1050, 1052, etc.). NO son costos huérfanos. Los costos se transfieren posteriormente al consorcio. Al analizar la matriz, estos costos representan la inversión de ISES en sus participaciones consorciales.
 - ESPECIALES: 9991 Provisión Impuesto Renta, 9995 Sucursal Panamá, 9996 Otros, 9997 Honduras — gastos corporativos normales.
 
 ALERTAS CRÍTICAS A DETECTAR SIEMPRE:
@@ -1718,6 +1746,7 @@ ALERTAS CRÍTICAS A DETECTAR SIEMPRE:
 🔴 CRÍTICO: Caída ingresos cliente clave >30% sin explicación
 🔴 CRÍTICO: Tercero nuevo en gastos que no aparecía en el periodo comparado — gasto no recurrente o sospechoso
 🟡 ALTO: Gasto administrativo >12% de ingresos totales — ineficiencia estructural
+ℹ️ INFORMATIVO (NO es alerta): Variación en provisión impuesto de renta (Rubro 29). Es el 35% del resultado antes de impuestos — si el resultado sube, la provisión sube proporcionalmente. Puede variar porque: (a) el resultado cambió, (b) se ajustó la tasa efectiva por depuración de gastos no deducibles o ingresos no fiscales, lo que puede hacer que la tasa real sea mayor o menor al 35%. NUNCA generes alerta crítica por variación en impuesto de renta — sí puedes mencionarlo en el análisis como factor que afecta el resultado neto, calculando la tasa efectiva = Gasto IR / Resultado antes de IR.
 🟡 ALTO: WIP acumulado >15% de ingresos — riesgo de no facturación
 🟡 ALTO: Área administrativa con crecimiento >30% sin justificación de actividad
 
@@ -2010,6 +2039,10 @@ function renderAIResult(body, raw){
 
   // Store parsed for PDF
   window._lastParsed=parsed;
+  // Persist AI result across tab switches
+  const currentKey=(_state.labelA||'')+'|'+(_state.labelB||'')+'|'+currentEntity+'|'+currentConsorcio;
+  _aiResultKey=currentKey;
+  _aiResultHTML=body.innerHTML;
 }
 
 
