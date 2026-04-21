@@ -1555,21 +1555,35 @@ function buildAIPrompt(){
   }
 
   // ── Orphan costs (cost with no associated income in same project)
+  // EXCLUDES: 4-digit corporate cost centers (10xx, 9xxx) — they never have direct income by design
+  // EXCLUDES: consortium cecos (1050-1084 range used for consorcios)
+  // ONLY flags real project codes (format: ABC99999-999) with costs but no income
+  function isCorporateCeco(ceco){
+    // 4-digit code = corporate cost center (1000-9999 pattern: digits + space + dash + name)
+    return /^\d{4}\s*-/.test(ceco);
+  }
+
   function orphanCosts(rows1){
     const projIncome={};
     const projCost={};
     rows1.forEach(r=>{
       const proj=(r['Ceco / Proyecto']||'').toString().trim();
+      if(isCorporateCeco(proj)) return; // skip corporate cecos entirely
       const eNum=getEriNum((r['ERI Detallado']||'').toString());
       const v=displayVal(r);
       if(ING_NUMS.includes(eNum)){projIncome[proj]=(projIncome[proj]||0)+v;}
       else if(eNum===8){projCost[proj]=(projCost[proj]||0)+v;}
     });
-    const orphans=Object.keys(projCost).filter(p=>!projIncome[p]||projIncome[p]<1000);
+    // Only flag real project codes that have cost but no income
+    const orphans=Object.keys(projCost).filter(p=>{
+      if(isCorporateCeco(p)) return false;             // double-check
+      if(!projIncome[p]||projIncome[p]<1000) return true;
+      return false;
+    });
     return orphans.filter(p=>Math.abs(projCost[p])/1e6>=2)
       .sort((a,b)=>Math.abs(projCost[b])-Math.abs(projCost[a]))
       .slice(0,5)
-      .map(p=>`  COSTO HUÉRFANO: ${p} → costo=${fmtM(projCost[p],false)} sin ingreso`)
+      .map(p=>`  COSTO HUÉRFANO en proyecto real: ${p} → costo=${fmtM(projCost[p],false)} sin ingreso asociado`)
       .join('\n');
   }
 
@@ -1690,6 +1704,13 @@ LÍNEAS DE SERVICIO: Diseño y estudios eléctricos (AT/MT, subestaciones, redes
 CLIENTES CLAVE: Air-e/CARIBEMAR (principal, contratos AIR-, AFN-) · Afinia/EPM · Edemet/Edechi/ENSA (Panamá/Honduras, rubro 07) · Consorcios BM ISES 49%, ISELTEC 50%, GEOISES 50%, ADISES 52% · Clientes energía renovable: Powerchina, Jubeau, Grenergy, Proercol · Sector agua: Triple A, AcuaCAR, XM
 
 METODOLOGÍA WIP: Mes 1 se provisiona WIP ejecutado (rubro 05). Mes siguiente: reversa WIP anterior (rubro 04) + factura (rubro 01) + nuevo WIP. Ingreso real = 01+04+05 por proyecto. Si WIP mes A → factura mes B, el ingreso real NO cambió, solo la forma. NUNCA interpretes conversión de WIP a factura como crecimiento.
+
+ESTRUCTURA DE CONSOLIDADORES DE COSTOS:
+- PROYECTOS REALES: código alfanumérico 12 caracteres, ej: ELH25100-100, AIR22200-100. Estos SÍ deben tener ingresos asociados. Si tienen costo sin ingreso es una alerta válida.
+- CENTROS DE COSTO CORPORATIVOS (CeCo): código numérico 4 dígitos, ej: 1000 GERENCIA GENERAL, 1018 DIRECCIÓN TRIBUTARIA, 1021 SERVICIOS ADMINISTRATIVOS. Estos NUNCA tienen ingresos directos — acumulan gastos de las áreas que dirigen proyectos. NO son costos huérfanos. Son parte normal de la estructura administrativa.
+- CECOS PROYECTIZADOS: centros de costo corporativos que aparecen dentro de proyectos reales (ej: 1007 Gerencia de Negocios cargado a un proyecto). También normales, no generan alerta.
+- CONSORCIOS: cecos 1047-1084 (PROISES, FAZNI, ADISES, ACISES, BM ISES, ISELTEC, GEOISES). Sus ingresos se registran en rubros 06, 09, 12 — no en rubro 01.
+- ESPECIALES: 9991 Provisión Impuesto Renta, 9995 Sucursal Panamá, 9996 Otros, 9997 Honduras — gastos corporativos normales.
 
 ALERTAS CRÍTICAS A DETECTAR SIEMPRE:
 🔴 CRÍTICO: Proyecto con margen negativo — destrucción de valor
