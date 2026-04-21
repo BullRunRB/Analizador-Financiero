@@ -1491,31 +1491,18 @@ function buildAIPrompt(){
   const mgnPct1=totIng1!==0?(res1/totIng1)*100:0;
   const mgnPct2=totIng2!==0?(res2/totIng2)*100:0;
 
-  // ── ERI summary with significant variations
   const sig=(_vars||[]).filter(v=>v.sig);
   const ingSig=sig.filter(v=>v.resultado.startsWith('01'));
   const costSig=sig.filter(v=>v.resultado.startsWith('02'));
   const otrosSig=sig.filter(v=>v.resultado.startsWith('03'));
 
-  // ── Project movements (top 25 by absolute variation)
+  // ── Project lines top 15
   const projLines=(_projByPeriod||[]).slice(0,15).map(p=>{
     const st=p.nuevo?'[NUEVO]':p.desap?'[INACTIVO]':Math.abs(p.diff)/1e6<3?'[ESTABLE]':p.diff>=0?'[CRECE]':'[CAE]';
     return`  ${st} ${p.proj}: ${labelA}=${fmtM(p.t1,false)}(fact=${fmtM(p.f1,false)},wip=${fmtM(p.w1,false)}) | ${labelB}=${fmtM(p.t2,false)}(fact=${fmtM(p.f2,false)},wip=${fmtM(p.w2,false)}) | var=${fmtM(p.diff)}(${fmtPct(p.pct)})`;
   }).join('\n');
 
-  // ── Cost drivers with sub-detail
-  const subData=_subData||{};
-  const costLines=costSig.map(v=>{
-    const subs=(subData[v.key]||[]).slice(0,5).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
-    return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${subs}`;
-  }).join('\n');
-
-  const otrosLines=otrosSig.map(v=>{
-    const subs=(subData[v.key]||[]).slice(0,5).map(s=>`    · ${s.key}: ${labelA}=${fmtM(s.sv1,false)} ${labelB}=${fmtM(s.sv2,false)} var=${fmtM(s.sd)}`).join('\n');
-    return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${subs}`;
-  }).join('\n');
-
-  // ── Projects with negative margin
+  // ── Negative margin projects
   const costByProj=buildCostByProj(r1);
   const negMargin=(_projByPeriod||[]).filter(p=>{
     const c=costByProj[p.proj]||0;
@@ -1527,54 +1514,238 @@ function buildAIPrompt(){
     return`  ${p.proj}: ingreso=${fmtM(p.t1,false)} costo=${fmtM(c,false)} margen=${fmtM(m)}(${mp.toFixed(1)}%)`;
   }).join('\n');
 
-  return `Eres el Director Financiero de una empresa de consultoría e ingeniería eléctrica en Colombia. Preparas el análisis para el Comité de Gerencia. Tu análisis debe ser riguroso, interpretativo, con cifras concretas y orientado a decisiones gerenciales. No repitas cifras sin interpretarlas.
+  // ── DEEP DETAIL: tercero + descripcion por rubro de costos/gastos
+  function deepDetail(rows1, rows2, nivel, parentKey, thresholdM){
+    const filtered1=rows1.filter(r=>(r[nivel]||'').toString().trim()===parentKey);
+    const filtered2=rows2.filter(r=>(r[nivel]||'').toString().trim()===parentKey);
 
-═══ CONTEXTO DEL COMPARATIVO ═══
-Comparativo: ${modoDesc}
-Entidad analizada: ${entLabel}
-Nivel de detalle: ${nivel}
+    // Group by Tercero
+    const byTerc1={}, byTerc2={};
+    filtered1.forEach(r=>{
+      const t=(r['Tercero']||'SIN TERCERO').toString().trim();
+      if(!byTerc1[t])byTerc1[t]={val:0,descs:{}};
+      byTerc1[t].val+=displayVal(r);
+      const d=(r['Descripción']||'').toString().trim().substring(0,60);
+      if(d)byTerc1[t].descs[d]=(byTerc1[t].descs[d]||0)+1;
+    });
+    filtered2.forEach(r=>{
+      const t=(r['Tercero']||'SIN TERCERO').toString().trim();
+      if(!byTerc2[t])byTerc2[t]={val:0,descs:{}};
+      byTerc2[t].val+=displayVal(r);
+    });
 
-═══ RESUMEN FINANCIERO ═══
-Ingresos reales (Fact+WIP, rubros 01-07):
-  ${labelA}: ${fmtM(totIng1,false)} COP
-  ${labelB}: ${fmtM(totIng2,false)} COP
-  Variación: ${fmtM(totIng1-totIng2)} (${fmtPct(totIng2!==0?(totIng1-totIng2)/Math.abs(totIng2)*100:0)})
+    const allT=[...new Set([...Object.keys(byTerc1),...Object.keys(byTerc2)])];
+    const rows=allT.map(t=>{
+      const v1=byTerc1[t]?byTerc1[t].val:0;
+      const v2=byTerc2[t]?byTerc2[t].val:0;
+      const d=v1-v2;
+      const descs=byTerc1[t]?Object.keys(byTerc1[t].descs).slice(0,2).join(' / '):'';
+      const isNew=v2===0&&v1!==0;
+      const isGone=v1===0&&v2!==0;
+      return{t,v1,v2,d,descs,isNew,isGone};
+    }).filter(x=>Math.abs(x.d)/1e6>=(thresholdM||1))
+      .sort((a,b)=>Math.abs(b.d)-Math.abs(a.d))
+      .slice(0,8);
 
-Costos directos:
-  ${labelA}: ${fmtM(totCost1,false)} | ${labelB}: ${fmtM(totCost2,false)} | var: ${fmtM(totCost1-totCost2)}
+    return rows.map(x=>{
+      const flag=x.isNew?'[NUEVO-NO RECURRENTE]':x.isGone?'[DESAPARECIÓ]':'';
+      const desc=x.descs?` desc:"${x.descs}"`:'';
+      return`    → ${x.t}${flag}: ${labelA}=${fmtM(x.v1,false)} ${labelB}=${fmtM(x.v2,false)} var=${fmtM(x.d)}${desc}`;
+    }).join('\n');
+  }
 
-Otros costos y gastos:
-  ${labelA}: ${fmtM(totOtros1,false)} | ${labelB}: ${fmtM(totOtros2,false)} | var: ${fmtM(totOtros1-totOtros2)}
+  // ── Orphan costs (cost with no associated income in same project)
+  function orphanCosts(rows1){
+    const projIncome={};
+    const projCost={};
+    rows1.forEach(r=>{
+      const proj=(r['Ceco / Proyecto']||'').toString().trim();
+      const eNum=getEriNum((r['ERI Detallado']||'').toString());
+      const v=displayVal(r);
+      if(ING_NUMS.includes(eNum)){projIncome[proj]=(projIncome[proj]||0)+v;}
+      else if(eNum===8){projCost[proj]=(projCost[proj]||0)+v;}
+    });
+    const orphans=Object.keys(projCost).filter(p=>!projIncome[p]||projIncome[p]<1000);
+    return orphans.filter(p=>Math.abs(projCost[p])/1e6>=2)
+      .sort((a,b)=>Math.abs(projCost[b])-Math.abs(projCost[a]))
+      .slice(0,5)
+      .map(p=>`  COSTO HUÉRFANO: ${p} → costo=${fmtM(projCost[p],false)} sin ingreso`)
+      .join('\n');
+  }
 
-Resultado neto:
-  ${labelA}: ${fmtM(res1)} | ${labelB}: ${fmtM(res2)} | var: ${fmtM(resDiff)} (${fmtPct(resPct)})
-  Margen neto ${labelA}: ${mgnPct1.toFixed(1)}% | ${labelB}: ${mgnPct2.toFixed(1)}%
+  // ── Admin efficiency analysis (deep)
+  function adminDetail(rows1, rows2){
+    const ADM_RUBRO='11 Gastos de Administración';
+    const r1f=rows1.filter(r=>(r['ERI Detallado']||'').toString().trim()===ADM_RUBRO);
+    const r2f=rows2.filter(r=>(r['ERI Detallado']||'').toString().trim()===ADM_RUBRO);
+    // By Ceco (area)
+    const byArea1={},byArea2={};
+    r1f.forEach(r=>{const k=(r['Ceco / Proyecto']||'').toString().trim();byArea1[k]=(byArea1[k]||0)+displayVal(r);});
+    r2f.forEach(r=>{const k=(r['Ceco / Proyecto']||'').toString().trim();byArea2[k]=(byArea2[k]||0)+displayVal(r);});
+    const areas=[...new Set([...Object.keys(byArea1),...Object.keys(byArea2)])];
+    const rows=areas.map(k=>({k,v1:byArea1[k]||0,v2:byArea2[k]||0,d:(byArea1[k]||0)-(byArea2[k]||0)}))
+      .filter(x=>Math.abs(x.d)/1e6>=1).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,8);
+    const byAreaStr=rows.map(x=>`    ${x.k}: ${labelA}=${fmtM(x.v1,false)} ${labelB}=${fmtM(x.v2,false)} var=${fmtM(x.d)}${x.v2===0&&x.v1!==0?' [NUEVO]':''}`).join('\n');
+    // By Tercero (who got paid)
+    const byTerc=deepDetail(r1f,r2f,'ERI Detallado',ADM_RUBRO,0.5);
+    const totAdm1=r1f.reduce((s,r)=>s+displayVal(r),0);
+    const admPct=totIng1>0?(totAdm1/totIng1*100):0;
+    return `  Total gasto admin: ${fmtM(totAdm1,false)} = ${admPct.toFixed(1)}% de ingresos ${admPct>12?'[ALERTA: supera 12%]':'[dentro del límite]'}\n  Por área:\n${byAreaStr}\n  Por tercero (quién cobró):\n${byTerc}`;
+  }
 
-═══ INGRESOS — VARIACIONES SIGNIFICATIVAS POR RUBRO ERI ═══
-${ingSig.length?ingSig.map(v=>`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} | ${labelB}=${fmtM(v.v2,false)} | var=${fmtM(v.diff)}(${fmtPct(v.pct)})`).join('\n'):'Sin variaciones significativas'}
+  // ── Non-recurring / suspicious expenses — validated against full historical
+  function suspiciousExpenses(rows1, rows2){
+    // Build full historical record of all terceros in expenses across ALL periods in the file
+    const allRows=getAll();
+    const histByTerc={};  // tercero -> Set of periods where it appeared in expenses
+    allRows.filter(r=>!isIngreso(r)).forEach(r=>{
+      const t=(r['Tercero']||'').toString().trim();
+      const per=(r['Periodo']||'').toString().trim();
+      if(!t||!per) return;
+      if(!histByTerc[t]) histByTerc[t]=new Set();
+      histByTerc[t].add(per);
+    });
 
-═══ INGRESOS — DETALLE POR PROYECTO (Fact+WIP consolidado) ═══
-NOTA METODOLÓGICA: El total por proyecto = Facturación + WIP del periodo. Una conversión de WIP a factura NO cambia el total — solo la composición. Analiza variaciones del TOTAL, no de cada componente por separado.
-${projLines||'Sin datos de proyectos'}
+    // Classify each tercero appearing in rows1 (current period) expenses
+    const currentPeriods=new Set(rows1.map(r=>(r['Periodo']||'').toString().trim()));
+    const terc1={};
+    rows1.filter(r=>!isIngreso(r)).forEach(r=>{
+      const t=(r['Tercero']||'').toString().trim();
+      if(!t) return;
+      const v=displayVal(r);
+      if(!terc1[t]) terc1[t]={val:0,descs:[]};
+      terc1[t].val+=v;
+      const d=(r['Descripción']||'').toString().trim().substring(0,60);
+      if(d&&!terc1[t].descs.includes(d)) terc1[t].descs.push(d);
+    });
 
-═══ COSTOS DIRECTOS — VARIACIONES SIGNIFICATIVAS ═══
+    // For each tercero in current period, determine historical status
+    const results=Object.entries(terc1)
+      .filter(([,x])=>Math.abs(x.val)/1e6>=1)
+      .map(([t,x])=>{
+        const hist=histByTerc[t]||new Set();
+        // Remove current periods from history to see prior appearances
+        const priorPeriods=[...hist].filter(p=>{
+          // p is prior if it's not in the current analysis periods
+          return ![...currentPeriods].includes(p);
+        }).sort();
+        const lastSeen=priorPeriods.length?priorPeriods[priorPeriods.length-1]:null;
+        const totalPriorPeriods=priorPeriods.length;
+
+        let flag, detail;
+        if(totalPriorPeriods===0){
+          flag='[NUEVO ABSOLUTO — nunca antes registrado]';
+          detail='Primera aparición histórica en el archivo';
+        } else if(totalPriorPeriods<=2){
+          flag='[INFRECUENTE — solo '+totalPriorPeriods+' periodo(s) previo(s)]';
+          detail='Últimas apariciones: '+priorPeriods.slice(-3).join(', ');
+        } else {
+          // Check if there's a gap — not seen recently
+          const sixMonthsAgo=allP.length>6?allP[allP.length-7]:allP[0];
+          const recentAppearances=priorPeriods.filter(p=>p>=sixMonthsAgo);
+          if(recentAppearances.length===0){
+            flag='[REAPARECE — no visto en últimos 6 meses]';
+            detail='Última vez: '+lastSeen+' ('+totalPriorPeriods+' periodos históricos)';
+          } else {
+            return null; // Recurrent tercero — not suspicious
+          }
+        }
+        return {t,val:x.val,descs:x.descs,flag,detail};
+      })
+      .filter(Boolean)
+      .sort((a,b)=>Math.abs(b.val)-Math.abs(a.val))
+      .slice(0,8);
+
+    return results.length
+      ? results.map(x=>`  ${x.flag} ${x.t}: ${fmtM(x.val,false)} | ${x.detail} | desc: "${x.descs.slice(0,2).join(' / ')}"`)
+          .join('\n')
+      : '  Sin terceros nuevos o infrecuentes materiales detectados';
+  }
+
+  const subData=_subData||{};
+  const costLines=costSig.map(v=>{
+    const deep=deepDetail(r1,r2,nivel,v.key,2);
+    return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${deep}`;
+  }).join('\n');
+
+  const otrosLines=otrosSig.map(v=>{
+    const deep=deepDetail(r1,r2,nivel,v.key,1);
+    return`  ${v.key}: ${labelA}=${fmtM(v.v1,false)} ${labelB}=${fmtM(v.v2,false)} var=${fmtM(v.diff)}(${fmtPct(v.pct)})\n${deep}`;
+  }).join('\n');
+
+  const adminAnalysis=adminDetail(r1,r2);
+  const orphans=orphanCosts(r1);
+  const suspicious=suspiciousExpenses(r1,r2);
+
+  return `Eres el Director Financiero y analista estratégico de ISES (Ingeniería y Soluciones Especializadas S.A.S.), empresa colombiana de consultoría e ingeniería eléctrica. Tu rol es presentar el análisis financiero al Comité de Gerencia con rigor, narrativa clara y orientación a decisiones. La gerencia prefiere: resumen narrativo primero, luego soporte numérico.
+
+═══ CONTEXTO EMPRESARIAL DE ISES ═══
+MODELO DE NEGOCIO:
+- Contratos por precio fijo (llave en mano): precio acordado, el margen depende de eficiencia en ejecución
+- Contratos mixtos por avance de obra: facturación por hitos aprobados por el cliente
+- Outsourcing/operación continua (OTC): contratos plurianuales de operación de redes, ingresos recurrentes predecibles
+
+LÍNEAS DE SERVICIO: Diseño y estudios eléctricos (AT/MT, subestaciones, redes) · Interventoría y supervisión · OTC - Operación técnica y comercial de redes · Consultoría regulatoria y ambiental · Levantamientos, inventarios y catastro de activos · Energía renovable · Sector agua y gestión social
+
+CLIENTES CLAVE: Air-e/CARIBEMAR (principal, contratos AIR-, AFN-) · Afinia/EPM · Edemet/Edechi/ENSA (Panamá/Honduras, rubro 07) · Consorcios BM ISES 49%, ISELTEC 50%, GEOISES 50%, ADISES 52% · Clientes energía renovable: Powerchina, Jubeau, Grenergy, Proercol · Sector agua: Triple A, AcuaCAR, XM
+
+METODOLOGÍA WIP: Mes 1 se provisiona WIP ejecutado (rubro 05). Mes siguiente: reversa WIP anterior (rubro 04) + factura (rubro 01) + nuevo WIP. Ingreso real = 01+04+05 por proyecto. Si WIP mes A → factura mes B, el ingreso real NO cambió, solo la forma. NUNCA interpretes conversión de WIP a factura como crecimiento.
+
+ALERTAS CRÍTICAS A DETECTAR SIEMPRE:
+🔴 CRÍTICO: Proyecto con margen negativo — destrucción de valor
+🔴 CRÍTICO: Costo huérfano (costo directo sin ingreso asociado en ese proyecto) — posible error o proyecto sin contrato
+🔴 CRÍTICO: Caída ingresos cliente clave >30% sin explicación
+🔴 CRÍTICO: Tercero nuevo en gastos que no aparecía en el periodo comparado — gasto no recurrente o sospechoso
+🟡 ALTO: Gasto administrativo >12% de ingresos totales — ineficiencia estructural
+🟡 ALTO: WIP acumulado >15% de ingresos — riesgo de no facturación
+🟡 ALTO: Área administrativa con crecimiento >30% sin justificación de actividad
+
+═══ DATOS DEL COMPARATIVO ═══
+Periodo: ${modoDesc} | Entidad: ${entLabel} | Nivel: ${nivel}
+
+RESUMEN FINANCIERO:
+· Ingresos reales ${labelA}: ${fmtM(totIng1,false)} | ${labelB}: ${fmtM(totIng2,false)} | var: ${fmtM(totIng1-totIng2)} (${fmtPct(totIng2!==0?(totIng1-totIng2)/Math.abs(totIng2)*100:0)})
+· Costos directos: ${labelA}=${fmtM(totCost1,false)} | ${labelB}=${fmtM(totCost2,false)} | var=${fmtM(totCost1-totCost2)}
+· Otros costos/gastos: ${labelA}=${fmtM(totOtros1,false)} | ${labelB}=${fmtM(totOtros2,false)} | var=${fmtM(totOtros1-totOtros2)}
+· Resultado neto: ${labelA}=${fmtM(res1)} | ${labelB}=${fmtM(res2)} | var=${fmtM(resDiff)} (${fmtPct(resPct)})
+· Margen neto: ${labelA}=${mgnPct1.toFixed(1)}% | ${labelB}=${mgnPct2.toFixed(1)}%
+
+INGRESOS POR PROYECTO (Fact+WIP consolidado, top 15):
+${projLines}
+
+${negMargin?'PROYECTOS CON MARGEN NEGATIVO:\n'+negMargin:''}
+
+${orphans?'COSTOS HUÉRFANOS DETECTADOS (costo sin ingreso asociado):\n'+orphans:''}
+
+COSTOS DIRECTOS — DETALLE POR TERCERO Y DESCRIPCIÓN:
 ${costLines||'Sin variaciones significativas'}
 
-═══ OTROS COSTOS Y GASTOS — VARIACIONES SIGNIFICATIVAS ═══
+OTROS COSTOS Y GASTOS — DETALLE POR TERCERO Y DESCRIPCIÓN:
 ${otrosLines||'Sin variaciones significativas'}
 
-${negMargin?`═══ PROYECTOS CON MARGEN BRUTO NEGATIVO ═══\n${negMargin}`:''}
+ANÁLISIS PROFUNDO GASTO ADMINISTRATIVO (Rubro 11):
+${adminAnalysis}
+
+TERCEROS NUEVOS EN GASTOS (no recurrentes / potencialmente sospechosos):
+${suspicious||'  Sin terceros nuevos materiales detectados'}
 
 ═══ INSTRUCCIONES PARA EL ANÁLISIS ═══
-1. INGRESOS: Para cada proyecto con variación, explica si es nuevo, creció, cayó o desapareció, y qué significa para el negocio. Identifica si el crecimiento es estructural (contratos nuevos/expansión) o puntual (facturación acumulada, estacionalidad).
-2. COSTOS: Identifica si los cambios de costo son consistentes con los movimientos de ingresos (ej: si un proyecto nuevo generó ingreso Y costo). Señala costos que crecen sin ingreso asociado visible.
-3. MARGEN: Comenta sobre la calidad del margen — ¿mejoró por eficiencia o por mix de proyectos? ¿Se deterioró por proyectos con margen negativo?
-4. ALERTAS: Señala riesgos concretos con nombres de proyectos, rubros o montos específicos.
-5. NO uses frases genéricas. Cada punto debe tener dato específico que lo sustente.
-6. Respeta la numeración ERI en el análisis.
+IMPORTANTE: Llega al nivel más bajo posible. Si un gasto subió, di exactamente QUÉ tercero lo generó, QUÉ concepto describe el movimiento, y si es recurrente o nuevo. No des análisis planos — la gerencia necesita saber el porqué detrás de cada número relevante.
 
-Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown, sin comillas extras):
-{"resumen":"Párrafo ejecutivo de 4-5 oraciones con las cifras más relevantes, la lectura del resultado neto y el margen, y cuál fue el factor dominante del periodo. Menciona proyectos o rubros específicos.","hallazgos":["Hallazgo 1: análisis profundo de ingresos — qué proyectos específicos explican la variación y qué significa para el negocio","Hallazgo 2: sobre costos directos — proyectos o rubros que generaron el mayor movimiento y si es consistente con ingresos","Hallazgo 3: sobre la estructura de gastos — administración, venta, financieros — qué subió o bajó y por qué","Hallazgo 4: sobre margen — calidad, tendencia y proyectos que más lo afectan"],"alertas":["Alerta 1: riesgo específico con nombre de proyecto/rubro/monto","Alerta 2","Alerta 3"],"recomendaciones":["Recomendación 1 accionable y específica para la gerencia","Recomendación 2","Recomendación 3","Recomendación 4"]}`;
+RESUMEN (4-5 oraciones): Narrativa ejecutiva. Empieza con resultado neto y margen. Factor dominante del periodo. ¿Es crecimiento/caída estructural o puntual? Señal más importante para la gerencia.
+
+HALLAZGOS — exactamente 4, uno por sección, CON DETALLE DE TERCEROS Y CONCEPTOS:
+1. INGRESOS: Agrupa proyectos en Nuevos / Crecen / Caen / Desaparecen. Para cada uno: ¿es conversión WIP→factura (no es ingreso nuevo) o es actividad real nueva? ¿Qué cliente o contrato lo explica?
+2. COSTOS Y EFICIENCIA: ¿Costos se mueven con ingresos? ¿Hay costos huérfanos? ¿Qué terceros generaron los mayores movimientos en costo directo? ¿El margen bruto de proyectos clave es sostenible?
+3. GASTOS ADMINISTRATIVOS — MUY DETALLADO: ¿Cuánto representa de los ingresos? ¿Qué área creció más? ¿Qué terceros específicos generaron el incremento? ¿Son recurrentes o nuevos? ¿Hay gastos de personal vs servicios vs otros? ¿Hay movimientos atípicos o no recurrentes?
+4. MARGEN Y RIESGOS: Calidad del margen. Proyectos que destruyen valor. ¿Es sostenible o depende de proyectos puntuales? ¿Hay gastos extraordinarios que distorsionan el resultado?
+
+ALERTAS (2-5): Usa los criterios críticos. Cada alerta: nombre proyecto/tercero/rubro + cifra exacta + riesgo concreto + urgencia.
+
+RECOMENDACIONES (3-4): Acción concreta + responsable sugerido + plazo orientativo.
+
+RESPONDE ÚNICAMENTE con este JSON sin texto adicional ni markdown:
+{"resumen":"narrativa ejecutiva 4-5 oraciones","hallazgos":["1. INGRESOS — detalle completo con proyectos, clientes y análisis WIP","2. COSTOS — eficiencia, costos huérfanos, terceros clave","3. GASTOS ADMINISTRATIVOS — detalle por área, tercero, concepto y recurrencia","4. MARGEN Y RIESGOS — calidad, sostenibilidad, distorsiones"],"alertas":["alerta con tercero/proyecto/cifra y riesgo concreto","alerta 2","alerta 3"],"recomendaciones":["acción + responsable + plazo","rec 2","rec 3"]}`;
 }
 
 // ─── Real AI call via local server ───
@@ -1602,7 +1773,7 @@ async function runAI(){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({prompt}),
-        signal:AbortSignal.timeout(90000)
+        signal:AbortSignal.timeout(120000)
       });
       if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error||`HTTP ${res.status}`);}
       return res.json();
