@@ -1960,39 +1960,104 @@ function renderAIResult(body, raw){
   const numH=(parsed.hallazgos||[]).length;
   const numA=(parsed.alertas||[]).length;
 
-  // ── Hallazgos cards
-  const hallazgosHtml=(parsed.hallazgos||[]).map(function(h){
+  // ── Hallazgos cards — structured with icons, bullets and highlights
+  const HALLAZGO_META=[
+    {icon:'📈', color:'#1a56e8', bg:'#eef2fd', border:'#c5d5fc', label:'Ingresos'},
+    {icon:'⚙️', color:'#0e7490', bg:'#e0f5fa', border:'#a5d8e8', label:'Costos'},
+    {icon:'🏢', color:'#9a5e00', bg:'#fef3e0', border:'#f5d78a', label:'Gastos Admin.'},
+    {icon:'📊', color:'#0d7a55', bg:'#e6f5ef', border:'#b3e4d3', label:'Margen'},
+  ];
+
+  function formatHallazgoBody(text){
+    // Split by ';' or '. PROYECTOS' patterns to create bullet points
+    // Also highlight money amounts and percentages
+    let highlighted = text
+      .replace(/(\+?\-?\$[\d.,]+[MKB])/g, '<strong style="color:var(--ink);">$1</strong>')
+      .replace(/(\+[\d.,]+%|-[\d.,]+%)/g, '<strong style="color:var(--ink);">$1</strong>');
+
+    // Split into sentences for bullets — split on '; ' or '. PROYECTOS' or '. La ' etc
+    const bullets = highlighted
+      .split(/(?:;\s+(?=[A-ZÁÉÍÓÚ\[]))|(?:\.\s+(?=PROYECTOS|La |El |Los |Las |Sin |Esto |Este |Esta |Adicionalmente|En contraste|DINÁMICA))/g)
+      .map(s=>s.trim()).filter(s=>s.length>20);
+
+    if(bullets.length<=1){
+      return '<p style="font-size:13px;line-height:1.75;color:var(--ink2);">'+highlighted+'</p>';
+    }
+    return '<ul style="list-style:none;margin:0;padding:0;">'
+      +bullets.map(function(b,i){
+        return '<li style="display:flex;gap:10px;padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,.05);">'
+          +'<span style="color:var(--ink4);font-size:11px;margin-top:3px;flex-shrink:0;">▸</span>'
+          +'<span style="font-size:13px;line-height:1.65;color:var(--ink2);">'+b+(b.endsWith('.')?'':'.')+'</span>'
+          +'</li>';
+      }).join('')
+      +'</ul>';
+  }
+
+  const hallazgosHtml=(parsed.hallazgos||[]).map(function(h,i){
+    const meta=HALLAZGO_META[i]||{icon:'●',color:'var(--blue)',bg:'var(--blue-bg)',border:'#c5d5fc',label:'Hallazgo '+(i+1)};
     const colon=h.indexOf(':');
-    const title=colon>0?h.substring(0,colon).trim():('Hallazgo');
-    const text=colon>0?h.substring(colon+1).trim():h;
-    return '<div style="background:var(--surface);border:1px solid var(--border);border-left:4px solid var(--blue);border-radius:var(--r-lg);padding:1rem 1.1rem;margin-bottom:.75rem;">'
-      +'<div class="h-card-title">'+escHtml(title)+'</div>'
-      +'<p style="font-size:13px;line-height:1.7;color:var(--ink);">'+escHtml(text)+'</p>'
+    // Title is everything before first colon on the first line
+    const firstLine=h.split('\n')[0];
+    const colonIdx=firstLine.indexOf(':');
+    const rawTitle=colonIdx>0?firstLine.substring(0,colonIdx).trim():('Hallazgo '+(i+1));
+    // Remove numbered prefix like "1. " or "2. "
+    const cleanTitle=rawTitle.replace(/^\d+\.\s*/,'');
+    const text=colonIdx>0?h.substring(h.indexOf(':')+1).trim():h;
+
+    return '<div style="background:var(--surface);border:1px solid '+meta.border+';border-radius:var(--r-lg);margin-bottom:1rem;overflow:hidden;">'
+      // Header bar
+      +'<div style="background:'+meta.bg+';border-bottom:1px solid '+meta.border+';padding:.65rem 1rem;display:flex;align-items:center;gap:8px;">'
+      +'<span style="font-size:16px;">'+meta.icon+'</span>'
+      +'<div style="flex:1;">'
+      +'<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:'+meta.color+';opacity:.7;">'+meta.label+'</div>'
+      +'<div style="font-size:12px;font-weight:700;color:'+meta.color+';line-height:1.3;">'+escHtml(cleanTitle)+'</div>'
+      +'</div>'
+      +'<span style="font-size:18px;font-weight:700;color:'+meta.color+';opacity:.15;">'+(i+1)+'</span>'
+      +'</div>'
+      // Body with smart bullet formatting
+      +'<div style="padding:.9rem 1rem;">'
+      +formatHallazgoBody(text)
+      +'</div>'
       +'</div>';
   }).join('');
 
-  // ── Alertas cards with severity color
+  // ── Alertas cards with severity icons and colors
   const alertasHtml=(parsed.alertas||[]).map(function(a){
     const up=a.toUpperCase();
-    const isCrit=up.startsWith('CR') ;
-    const isAlto=up.startsWith('ALTO')||up.startsWith('AT');
+    const isCrit=up.startsWith('CR')||up.includes('CRÍTICO');
+    const isAlto=up.startsWith('ALTO')||up.startsWith('AT')||up.includes('ALTO RIESGO');
+    const isMon=up.startsWith('MON')||up.startsWith('INFO')||up.startsWith('ATEN');
+    const icon=isCrit?'🔴':isAlto?'🟡':'🔵';
     const color=isCrit?'var(--red)':isAlto?'var(--amber)':'var(--blue)';
     const bg=isCrit?'var(--red-bg)':isAlto?'var(--amber-bg)':'var(--blue-bg)';
     const border=isCrit?'#f5c5c0':isAlto?'#f5d78a':'#c5d5fc';
     const colon=a.indexOf(':');
-    const title2=colon>0?a.substring(0,colon).trim():'Alerta';
+    const rawTitle=colon>0?a.substring(0,colon).trim():'Alerta';
     const text2=colon>0?a.substring(colon+1).trim():a;
-    return '<div style="background:'+bg+';border:1px solid '+border+';border-radius:var(--r-lg);padding:.9rem 1.1rem;margin-bottom:.75rem;">'
-      +'<div style="font-size:10px;font-weight:700;color:'+color+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;">'+escHtml(title2)+'</div>'
-      +'<p style="font-size:12px;line-height:1.65;color:var(--ink);">'+escHtml(text2)+'</p>'
+    return '<div style="background:'+bg+';border:1px solid '+border+';border-radius:var(--r-lg);margin-bottom:.75rem;overflow:hidden;">'
+      +'<div style="padding:.6rem 1rem;display:flex;align-items:center;gap:8px;border-bottom:1px solid '+border+';">'
+      +'<span style="font-size:14px;">'+icon+'</span>'
+      +'<span style="font-size:11px;font-weight:700;color:'+color+';text-transform:uppercase;letter-spacing:.05em;flex:1;">'+escHtml(rawTitle)+'</span>'
+      +'</div>'
+      +'<p style="font-size:12px;line-height:1.65;color:var(--ink);padding:.75rem 1rem;margin:0;">'+escHtml(text2)+'</p>'
       +'</div>';
   }).join('');
 
-  // ── Recomendaciones numbered
+  // ── Recomendaciones numbered with action labels
   const recsHtml=(parsed.recomendaciones||[]).map(function(r,i){
-    return '<div style="display:flex;gap:10px;padding:.75rem 0;border-bottom:0.5px solid var(--border);">'
-      +'<div style="width:24px;height:24px;border-radius:50%;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;">'+(i+1)+'</div>'
-      +'<p style="font-size:13px;line-height:1.65;color:var(--ink);">'+escHtml(r)+'</p>'
+    // Extract action verb from start if present
+    const colon=r.indexOf(':');
+    const hasLabel=colon>0&&colon<40;
+    const label=hasLabel?r.substring(0,colon).trim().replace(/^\d+\.\s*/,''):'';
+    const body2=hasLabel?r.substring(colon+1).trim():r;
+    const colors=['#1a56e8','#0e7490','#0d7a55','#7c3aed'];
+    const col=colors[i]||'var(--green)';
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:.85rem 1rem;margin-bottom:.65rem;display:flex;gap:12px;align-items:flex-start;">'
+      +'<div style="width:28px;height:28px;border-radius:50%;background:'+col+';color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">'+(i+1)+'</div>'
+      +'<div style="flex:1;">'
+      +(label?'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:'+col+';margin-bottom:3px;">'+escHtml(label)+'</div>':'')
+      +'<p style="font-size:12px;line-height:1.65;color:var(--ink2);margin:0;">'+escHtml(body2)+'</p>'
+      +'</div>'
       +'</div>';
   }).join('');
 
