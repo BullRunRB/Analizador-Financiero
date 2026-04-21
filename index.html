@@ -1754,20 +1754,11 @@ async function runAI(){
   const btn=document.getElementById('ai-run-btn');
   const body=document.getElementById('ai-body');
   btn.disabled=true;
-  body.innerHTML='<div class="ai-spinner"><div class="spinner"></div>Generando análisis gerencial con IA...</div>';
 
-  try{
-    const prompt=buildAIPrompt();
+  const WORKER_URL = 'https://analizadorfinanciero.worldgncolombia.workers.dev/api/analyze';
+  const LOCAL_URL  = 'http://localhost:8765/api/analyze';
 
-    // ── Llama al Cloudflare Worker (o servidor local como fallback)
-    let raw='';
-    // ══════════════════════════════════════════════════════
-    //  CONFIGURA AQUÍ TU URL DEL CLOUDFLARE WORKER
-    //  Ejemplo: 'https://analizador-contable.tucuenta.workers.dev/api/analyze'
-    // ══════════════════════════════════════════════════════
-    const WORKER_URL = 'https://analizadorfinanciero.worldgncolombia.workers.dev/api/analyze';
-    const LOCAL_URL  = 'http://localhost:8765/api/analyze';
-
+  async function callAPI(prompt){
     const tryFetch=async(url)=>{
       const res=await fetch(url,{
         method:'POST',
@@ -1778,23 +1769,47 @@ async function runAI(){
       if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.error||`HTTP ${res.status}`);}
       return res.json();
     };
+    if(!WORKER_URL.includes('REEMPLAZAR')){
+      return tryFetch(WORKER_URL);
+    } else {
+      return tryFetch(LOCAL_URL);
+    }
+  }
 
+  try{
+    const fullPrompt=buildAIPrompt();
+
+    // ── CALL 1: Get resumen + hallazgos (most important, heaviest content)
+    body.innerHTML='<div class="ai-spinner"><div class="spinner"></div>Generando resumen y hallazgos (1/2)...</div>';
+
+    const prompt1=fullPrompt+'\n\nIMPORTANTE: En esta primera llamada genera SOLO "resumen" y "hallazgos". Responde con JSON parcial: {"resumen":"...","hallazgos":["1...","2...","3...","4..."]}';
+
+    let raw1='', raw2='';
     try{
-      // Intenta Worker primero, luego servidor local como fallback
-      let data;
-      if(!WORKER_URL.includes('REEMPLAZAR')){
-        data=await tryFetch(WORKER_URL);
-      } else {
-        data=await tryFetch(LOCAL_URL);
-      }
-      raw=data.text||'';
+      const data1=await callAPI(prompt1);
+      raw1=data1.text||'';
     }catch(err){
-      showChatFallback(prompt, err.message);
+      showChatFallback(fullPrompt, err.message);
       btn.disabled=false;
       return;
     }
 
-    renderAIResult(body, raw);
+    // ── CALL 2: Get alertas + recomendaciones
+    body.innerHTML='<div class="ai-spinner"><div class="spinner"></div>Generando alertas y recomendaciones (2/2)...</div>';
+
+    const prompt2=fullPrompt+'\n\nIMPORTANTE: Ya generaste el resumen y hallazgos. En esta segunda llamada genera SOLO "alertas" y "recomendaciones". Responde con JSON parcial: {"alertas":["...","..."],"recomendaciones":["...","..."]}';
+
+    try{
+      const data2=await callAPI(prompt2);
+      raw2=data2.text||'';
+    }catch(err){
+      raw2='{"alertas":[],"recomendaciones":[]}';
+    }
+
+    // ── Merge both responses
+    const merged=mergeResponses(raw1, raw2);
+    renderAIResult(body, merged);
+
   }catch(err){
     body.innerHTML=`<div class="ai-error-box">
       <strong>Error al generar el análisis</strong>
@@ -1804,6 +1819,61 @@ async function runAI(){
   }
   btn.disabled=false;
 }
+
+function mergeResponses(raw1, raw2){
+  function parseRobust(raw){
+    let parsed=null;
+    try{
+      let clean=raw.trim()
+        .replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/```\s*$/,'').trim();
+      // Try to close truncated JSON
+      if(!clean.endsWith('}')){
+        const opens=(clean.match(/\[/g)||[]).length-(clean.match(/\]/g)||[]).length;
+        for(let i=0;i<opens;i++) clean+=']';
+        if(!clean.trim().endsWith('}')) clean+='}';
+      }
+      try{ parsed=JSON.parse(clean); }catch(e){
+        // Regex extraction fallback
+        parsed={};
+        const rRes=clean.match(/"resumen"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if(rRes) parsed.resumen=rRes[1].replace(/\\n/g,'\n');
+        const rHall=clean.match(/"hallazgos"\s*:\s*\[([\s\S]*?)(?:\](?:\s*}|,|\s*$)|$)/);
+        if(rHall){
+          try{
+            const arr=JSON.parse('['+rHall[1].trim().replace(/,?\s*$/,'')+']');
+            parsed.hallazgos=arr;
+          }catch(e2){
+            // Extract individual strings
+            const items=[...rHall[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m=>m[1]);
+            if(items.length) parsed.hallazgos=items;
+          }
+        }
+        const rAlert=clean.match(/"alertas"\s*:\s*\[([\s\S]*?)(?:\](?:\s*}|,|\s*$)|$)/);
+        if(rAlert){
+          try{ parsed.alertas=JSON.parse('['+rAlert[1].trim().replace(/,?\s*$/,'')+']'); }
+          catch(e2){ parsed.alertas=[]; }
+        }
+        const rRec=clean.match(/"recomendaciones"\s*:\s*\[([\s\S]*?)(?:\](?:\s*}|,|\s*$)|$)/);
+        if(rRec){
+          try{ parsed.recomendaciones=JSON.parse('['+rRec[1].trim().replace(/,?\s*$/,'')+']'); }
+          catch(e2){ parsed.recomendaciones=[]; }
+        }
+      }
+    }catch(e){}
+    return parsed||{};
+  }
+
+  const p1=parseRobust(raw1);
+  const p2=parseRobust(raw2);
+
+  return JSON.stringify({
+    resumen: p1.resumen||p2.resumen||'',
+    hallazgos: p1.hallazgos||p2.hallazgos||[],
+    alertas: p2.alertas||p1.alertas||[],
+    recomendaciones: p2.recomendaciones||p1.recomendaciones||[]
+  });
+}
+
 
 function renderAIResult(body, raw){
   let parsed=null;
