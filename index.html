@@ -912,6 +912,63 @@ function subCostDetail(rows, nivel, parentKey, subField){
   return Object.values(m).filter(x=>Math.abs(x.val)>0).sort((a,b)=>Math.abs(b.val)-Math.abs(a.val));
 }
 
+// 4-level drill-down: Rubro > CeCo/Proyecto > Cuenta Mayor > Cuenta Descripción
+function buildDrillDown(rows1, rows2, rubroKey){
+  // Level 1: filter by rubro (ERI Detallado)
+  const f1=rows1.filter(r=>(r['ERI Detallado']||'').toString().trim()===rubroKey);
+  const f2=rows2.filter(r=>(r['ERI Detallado']||'').toString().trim()===rubroKey);
+
+  // Level 2: group by CeCo/Proyecto
+  function groupBy(rows, field){
+    const m={};
+    rows.forEach(r=>{
+      const k=(r[field]||'Sin clasificar').toString().trim();
+      const v=displayVal(r);
+      if(!m[k]) m[k]=0;
+      m[k]+=v;
+    });
+    return m;
+  }
+
+  const ceco1=groupBy(f1,'Ceco / Proyecto');
+  const ceco2=groupBy(f2,'Ceco / Proyecto');
+  const allCecos=[...new Set([...Object.keys(ceco1),...Object.keys(ceco2)])];
+
+  return allCecos.map(ceco=>{
+    const sv1=ceco1[ceco]||0, sv2=ceco2[ceco]||0, sd=sv1-sv2;
+
+    // Level 3: group by Cuenta Mayor within this ceco
+    const cfRows1=f1.filter(r=>(r['Ceco / Proyecto']||'').toString().trim()===ceco);
+    const cfRows2=f2.filter(r=>(r['Ceco / Proyecto']||'').toString().trim()===ceco);
+    const cta1=groupBy(cfRows1,'Cuenta Mayor');
+    const cta2=groupBy(cfRows2,'Cuenta Mayor');
+    const allCtas=[...new Set([...Object.keys(cta1),...Object.keys(cta2)])];
+
+    const cuentas=allCtas.map(cta=>{
+      const cv1=cta1[cta]||0, cv2=cta2[cta]||0, cd=cv1-cv2;
+
+      // Level 4: group by Cuenta Descripción within this cta
+      const cdRows1=cfRows1.filter(r=>(r['Cuenta Mayor']||'').toString().trim()===cta);
+      const cdRows2=cfRows2.filter(r=>(r['Cuenta Mayor']||'').toString().trim()===cta);
+      const desc1=groupBy(cdRows1,'Cuenta Descripción');
+      const desc2=groupBy(cdRows2,'Cuenta Descripción');
+      const allDescs=[...new Set([...Object.keys(desc1),...Object.keys(desc2)])];
+
+      const descs=allDescs.map(desc=>{
+        const dv1=desc1[desc]||0, dv2=desc2[desc]||0, dd=dv1-dv2;
+        return{key:desc,sv1:dv1,sv2:dv2,sd:dd};
+      }).filter(x=>Math.abs(x.sv1)>0||Math.abs(x.sv2)>0)
+        .sort((a,b)=>Math.abs(b.sd)-Math.abs(a.sd));
+
+      return{key:cta,sv1:cv1,sv2:cv2,sd:cd,children:descs};
+    }).filter(x=>Math.abs(x.sv1)>0||Math.abs(x.sv2)>0)
+      .sort((a,b)=>Math.abs(b.sd)-Math.abs(a.sd));
+
+    return{key:ceco,sv1,sv2,sd,children:cuentas};
+  }).filter(x=>Math.abs(x.sv1)>0||Math.abs(x.sv2)>0)
+    .sort((a,b)=>Math.abs(b.sd)-Math.abs(a.sd));
+}
+
 // ═══════════════════════════════════════════
 // MAIN RUN
 // ═══════════════════════════════════════════
@@ -1227,33 +1284,122 @@ function buildERI(){
           }
         }
       } else if(hasCostDetail){
-        // Cost/expense rubros: show sub-detail with top relevant + show-all option
-        const costSubs=subData[v.key]||[];
-        const shown=costSubs.slice(0,10);
-        const hidden=costSubs.slice(10);
-        const saId='sac_'+Math.random().toString(36).substr(2,5);
-        subPanelHtml=`<div class="proj-detail" id="${rid}">
-          <div class="proj-detail-hd" style="grid-template-columns:2fr 100px 100px 100px 80px;">
-            <span>Detalle</span><span>${labelA}</span><span>${labelB}</span><span>Variación</span><span></span>
-          </div>
-          ${shown.map(s=>`<div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;">
-            <div class="proj-name">${s.key}</div>
-            <div class="proj-val">${fmtM(s.sv1,false)}</div>
-            <div class="proj-val" style="color:var(--ink3);">${fmtM(s.sv2,false)}</div>
-            <div class="proj-var ${s.sd>=0?'pos':'neg'}">${fmtM(s.sd)}</div>
-            <div class="proj-status">${s.sv2===0&&s.sv1!==0?'<span class="badge badge-nueva">Nuevo</span>':s.sv1===0&&s.sv2!==0?'<span class="badge badge-desap">Inactivo</span>':s.sd>=0?'<span class="badge badge-baja" style="background:var(--green-bg);color:var(--green);">▲</span>':'<span class="badge badge-alta">▼</span>'}</div>
-          </div>`).join('')}
-          ${hidden.length?`<div id="${saId}" style="display:none;">${hidden.map(s=>`<div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;">
-            <div class="proj-name">${s.key}</div>
-            <div class="proj-val">${fmtM(s.sv1,false)}</div>
-            <div class="proj-val" style="color:var(--ink3);">${fmtM(s.sv2,false)}</div>
-            <div class="proj-var ${s.sd>=0?'pos':'neg'}">${fmtM(s.sd)}</div>
-            <div></div>
-          </div>`).join('')}</div>
-          <div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;cursor:pointer;" onclick="toggleShowAll('${saId}',this)">
-            <div style="color:var(--blue);font-size:11px;">▼ Ver todos los ${costSubs.length} registros</div>
-          </div>`:''}
-        </div>`;
+        // 4-level drill: Rubro > CeCo/Proyecto > Cuenta Mayor > Cuenta Descripción
+        // Only available when nivel === 'ERI Detallado'
+        const useDeep=(nivel==='ERI Detallado');
+        if(useDeep){
+          const drillData=buildDrillDown(r1,r2,v.key);
+          const COLS='grid-template-columns:2fr 100px 100px 100px 80px';
+          const TOP_CECOS=10;
+          const shownCecos=drillData.slice(0,TOP_CECOS);
+          const hiddenCecos=drillData.slice(TOP_CECOS);
+          const saIdMain='dsa_'+Math.random().toString(36).substr(2,5);
+
+          function renderDescRow(d, depth){
+            const indent=depth*16;
+            const badge=d.sv2===0&&d.sv1!==0?'<span class="badge badge-nueva">Nuevo</span>':
+              d.sv1===0&&d.sv2!==0?'<span class="badge badge-desap">Inactivo</span>':
+              d.sd>=0?'<span class="badge badge-baja" style="background:var(--green-bg);color:var(--green);">▲</span>':
+              '<span class="badge badge-alta">▼</span>';
+            return`<div class="proj-row" style="${COLS};background:#fafafb;">
+              <div class="proj-name" style="padding-left:${indent+8}px;font-size:10px;color:var(--ink3);">
+                <span style="color:var(--ink4);margin-right:4px;">└</span>${d.key}
+              </div>
+              <div class="proj-val" style="font-size:10px;">${fmtM(d.sv1,false)}</div>
+              <div class="proj-val" style="font-size:10px;color:var(--ink4);">${fmtM(d.sv2,false)}</div>
+              <div class="proj-var ${d.sd>=0?'pos':'neg'}" style="font-size:10px;">${fmtM(d.sd)}</div>
+              <div class="proj-status">${badge}</div>
+            </div>`;
+          }
+
+          function renderCuentaRow(cta, cecoId){
+            const ctaId='cta_'+Math.random().toString(36).substr(2,5);
+            const hasDescs=cta.children&&cta.children.length>0;
+            const badge=cta.sv2===0&&cta.sv1!==0?'<span class="badge badge-nueva">Nuevo</span>':
+              cta.sv1===0&&cta.sv2!==0?'<span class="badge badge-desap">Inactivo</span>':
+              cta.sd>=0?'<span class="badge badge-baja" style="background:var(--green-bg);color:var(--green);">▲</span>':
+              '<span class="badge badge-alta">▼</span>';
+            const descRows=hasDescs?cta.children.map(d=>renderDescRow(d,3)).join(''):'';
+            return`<div>
+              <div class="proj-row" style="${COLS};background:#f5f6f9;cursor:${hasDescs?'pointer':'default'};"
+                ${hasDescs?`onclick="toggleDetail('${ctaId}',this)"`:''}>
+                <div class="proj-name" style="padding-left:32px;font-size:11px;color:var(--ink2);">
+                  ${hasDescs?'<span class="row-chev" style="font-size:9px;">▶</span>':'<span style="width:12px;display:inline-block;"></span>'}
+                  <span style="color:var(--ink4);margin-right:4px;">└─</span>${cta.key}
+                </div>
+                <div class="proj-val" style="font-size:11px;">${fmtM(cta.sv1,false)}</div>
+                <div class="proj-val" style="font-size:11px;color:var(--ink4);">${fmtM(cta.sv2,false)}</div>
+                <div class="proj-var ${cta.sd>=0?'pos':'neg'}" style="font-size:11px;">${fmtM(cta.sd)}</div>
+                <div class="proj-status">${badge}</div>
+              </div>
+              ${hasDescs?`<div id="${ctaId}" style="display:none;">${descRows}</div>`:''}
+            </div>`;
+          }
+
+          function renderCecoRow(ceco){
+            const cecoId='ceco_'+Math.random().toString(36).substr(2,5);
+            const hasCtas=ceco.children&&ceco.children.length>0;
+            const badge=ceco.sv2===0&&ceco.sv1!==0?'<span class="badge badge-nueva">Nuevo</span>':
+              ceco.sv1===0&&ceco.sv2!==0?'<span class="badge badge-desap">Inactivo</span>':
+              ceco.sd>=0?'<span class="badge badge-baja" style="background:var(--green-bg);color:var(--green);">▲</span>':
+              '<span class="badge badge-alta">▼</span>';
+            const ctaRows=hasCtas?ceco.children.map(cta=>renderCuentaRow(cta,cecoId)).join(''):'';
+            return`<div>
+              <div class="proj-row" style="${COLS};cursor:${hasCtas?'pointer':'default'};"
+                ${hasCtas?`onclick="toggleDetail('${cecoId}',this)"`:''}>
+                <div class="proj-name" style="padding-left:16px;">
+                  ${hasCtas?'<span class="row-chev">▶</span>':'<span style="width:14px;display:inline-block;"></span>'}
+                  ${ceco.key}
+                </div>
+                <div class="proj-val">${fmtM(ceco.sv1,false)}</div>
+                <div class="proj-val" style="color:var(--ink3);">${fmtM(ceco.sv2,false)}</div>
+                <div class="proj-var ${ceco.sd>=0?'pos':'neg'}">${fmtM(ceco.sd)}</div>
+                <div class="proj-status">${badge}</div>
+              </div>
+              ${hasCtas?`<div id="${cecoId}" style="display:none;">${ctaRows}</div>`:''}
+            </div>`;
+          }
+
+          subPanelHtml=`<div class="proj-detail" id="${rid}">
+            <div class="proj-detail-hd" style="${COLS};">
+              <span>CeCo / Proyecto → Cuenta Mayor → Cuenta Descripción</span>
+              <span>${labelA}</span><span>${labelB}</span><span>Variación</span><span></span>
+            </div>
+            ${shownCecos.map(renderCecoRow).join('')}
+            ${hiddenCecos.length?`<div id="${saIdMain}" style="display:none;">${hiddenCecos.map(renderCecoRow).join('')}</div>
+            <div class="proj-row" style="${COLS};cursor:pointer;" onclick="toggleShowAll('${saIdMain}',this)">
+              <div style="color:var(--blue);font-size:11px;padding-left:8px;">▼ Ver todos los ${drillData.length} centros de costo/proyectos</div>
+            </div>`:''}
+          </div>`;
+        } else {
+          // Other levels: flat list as before
+          const costSubs=subData[v.key]||[];
+          const shown=costSubs.slice(0,10);
+          const hidden=costSubs.slice(10);
+          const saId='sac_'+Math.random().toString(36).substr(2,5);
+          subPanelHtml=`<div class="proj-detail" id="${rid}">
+            <div class="proj-detail-hd" style="grid-template-columns:2fr 100px 100px 100px 80px;">
+              <span>Detalle</span><span>${labelA}</span><span>${labelB}</span><span>Variación</span><span></span>
+            </div>
+            ${shown.map(s=>`<div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;">
+              <div class="proj-name">${s.key}</div>
+              <div class="proj-val">${fmtM(s.sv1,false)}</div>
+              <div class="proj-val" style="color:var(--ink3);">${fmtM(s.sv2,false)}</div>
+              <div class="proj-var ${s.sd>=0?'pos':'neg'}">${fmtM(s.sd)}</div>
+              <div class="proj-status">${s.sv2===0&&s.sv1!==0?'<span class="badge badge-nueva">Nuevo</span>':s.sv1===0&&s.sv2!==0?'<span class="badge badge-desap">Inactivo</span>':s.sd>=0?'<span class="badge badge-baja" style="background:var(--green-bg);color:var(--green);">▲</span>':'<span class="badge badge-alta">▼</span>'}</div>
+            </div>`).join('')}
+            ${hidden.length?`<div id="${saId}" style="display:none;">${hidden.map(s=>`<div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;">
+              <div class="proj-name">${s.key}</div>
+              <div class="proj-val">${fmtM(s.sv1,false)}</div>
+              <div class="proj-val" style="color:var(--ink3);">${fmtM(s.sv2,false)}</div>
+              <div class="proj-var ${s.sd>=0?'pos':'neg'}">${fmtM(s.sd)}</div>
+              <div></div>
+            </div>`).join('')}</div>
+            <div class="proj-row" style="grid-template-columns:2fr 100px 100px 100px 80px;cursor:pointer;" onclick="toggleShowAll('${saId}',this)">
+              <div style="color:var(--blue);font-size:11px;">▼ Ver todos los ${costSubs.length} registros</div>
+            </div>`:''}
+          </div>`;
+        }
       }
 
       const hasSub=hasIngDetail||hasCostDetail;
