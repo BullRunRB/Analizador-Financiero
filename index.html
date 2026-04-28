@@ -85,7 +85,7 @@ body { font-family: var(--font); background: var(--surface2); color: var(--ink);
 }
 .topbar-brand-icon svg { width: 14px; height: 14px; fill: #fff; }
 .topbar-title { font-size: 13px; font-weight: 600; color: #fff; letter-spacing: .01em; }
-.topbar-sub { font-size: 10px; color: rgba(255,255,255,.85); letter-spacing:.01em; }
+.topbar-sub { font-size: 10px; color: var(--ink4); letter-spacing:.01em; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .topbar-file-btn {
   display: flex; align-items: center; gap: 6px;
@@ -653,6 +653,11 @@ code { background: var(--surface3); padding: 1px 5px; border-radius: 4px; font-f
   .kpi-row { grid-template-columns: repeat(3, 1fr); }
 }
 .h-card-title{font-size:10px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;}
+
+@keyframes bounce {
+  0%,80%,100% { transform: scale(0); opacity:.3; }
+  40%          { transform: scale(1); opacity:1; }
+}
 </style>
 </head>
 <body>
@@ -736,7 +741,7 @@ code { background: var(--surface3); padding: 1px 5px; border-radius: 4px; font-f
     <div class="empty-state">
       <div class="empty-icon">📊</div>
       <div class="empty-title">Cargue el archivo de datos para comenzar</div>
-      <div class="empty-sub">Haga clic en "Cargar Excel" en la barra superior.<br>Se requieren las hojas <strong>Datos 2025</strong> y <strong>Datos 2026</strong>.</div>
+      <div class="empty-sub">Haga clic en "Cargar Excel" en la barra superior.<br>Se requieren las hojas <strong>Datos 2025</strong>, <strong>Datos 2026</strong>, <strong>Datos 2024</strong> y/o <strong>Datos a 2023</strong>.</div>
     </div>
   </div>
 
@@ -747,7 +752,7 @@ code { background: var(--surface3); padding: 1px 5px; border-radius: 4px; font-f
 // ═══════════════════════════════════════════
 // DATA & STATE
 // ═══════════════════════════════════════════
-let wbData=null, allP=[], currentEntity='all', currentView='eri', currentSort='ingreso', showOnlyNeg=false, currentConsorcio='all';
+let wbData=null, allP=[], currentEntity='all', currentView='eri', currentSort='ingreso', showOnlyNeg=false, currentConsorcio='all', projSearch='', projColSort={col:'ingreso',dir:-1};
 let _state=null;
 
 const ING_NUMS=[1,2,3,4,5,7];
@@ -832,7 +837,7 @@ function isIngreso(r){ return (r['Resultado']||'').toString().startsWith('01'); 
 function displayVal(r){ const v=parseFloat(r['Valor']||0); return isIngreso(r)?-v:v; }
 function getEriNum(k){ const m=(k||'').match(/^(\d+)/); return m?parseInt(m[1]):999; }
 
-function getAll(){ return [...(wbData['Datos 2025']||[]),...(wbData['Datos 2026']||[])]; }
+function getAll(){ return [...(wbData['Datos a 2023']||[]),...(wbData['Datos 2024']||[]),...(wbData['Datos 2025']||[]),...(wbData['Datos 2026']||[])]; }
 
 // ═══════════════════════════════════════════
 // FILE LOAD
@@ -852,7 +857,87 @@ function handleFile(f){
       const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
       console.log('Sheets found:', wb.SheetNames);
       wbData={};
-      ['Datos 2025','Datos 2026'].forEach(s=>{ if(wb.SheetNames.includes(s)) wbData[s]=XLSX.utils.sheet_to_json(wb.Sheets[s]); });
+      // Leer hojas de datos principales (soporta distintos nombres)
+      const dataSheets2025 = ['Datos 2025','Datos2025','datos 2025'];
+      const dataSheets2026 = ['Datos 2026','Datos2026','datos 2026'];
+      const dataSheets2024 = ['Datos 2024','Datos2024','datos 2024'];
+      const dataSheets2023 = ['Datos a 2023','Datos 2023','datos a 2023','Datos2023'];
+
+      const findSheet = (names) => names.find(n => wb.SheetNames.includes(n));
+
+      const s2025 = findSheet(dataSheets2025);
+      const s2026 = findSheet(dataSheets2026);
+      const s2024 = findSheet(dataSheets2024);
+      const s2023 = findSheet(dataSheets2023);
+
+      const PROJ_RE_LOAD = /^[A-Z]{2,5}\d{5}-\d{3}$/;
+
+      // Leer hoja como arrays (header:1) y convertir a objetos
+      // Más eficiente en memoria que sheet_to_json directo para hojas grandes
+      function loadSheetFast(ws, filterByProj){
+        // Obtener rango de la hoja
+        const ref = ws['!ref'];
+        if(!ref) return [];
+        // Leer como array de arrays (mucho más rápido)
+        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+        if(aoa.length < 2) return [];
+        const headers = aoa[0].map(h=>String(h||'').trim());
+        // Índices de columnas clave
+        const iRes  = headers.indexOf('Resultado');
+        const iCeco = headers.indexOf('Ceco / Proyecto');
+        const iID   = headers.indexOf('ID Ceco / Proyecto');
+        const iVal  = headers.indexOf('Valor');
+        const results = [];
+        for(let i=1; i<aoa.length; i++){
+          const row = aoa[i];
+          const id  = String(row[iID]||'').trim();
+          const ceco= String(row[iCeco]||'').trim();
+          // Para Vigencia solo necesitamos proyectos reales
+          const projId = PROJ_RE_LOAD.test(id) ? id : ceco.split(' - ')[0].trim();
+          if(filterByProj && !PROJ_RE_LOAD.test(projId)) continue;
+          results.push({
+            'Resultado': String(row[iRes]||''),
+            'Ceco / Proyecto': ceco,
+            'ID Ceco / Proyecto': projId,
+            'Valor': Number(row[iVal])||0,
+            // Para ERI también necesitamos estos campos
+            'ERI Detallado': String(row[headers.indexOf('ERI Detallado')]||''),
+            'ERI': String(row[headers.indexOf('ERI')]||''),
+            'Periodo': String(row[headers.indexOf('Periodo')]||''),
+            'Tipo de asiento': String(row[headers.indexOf('Tipo de asiento')]||''),
+            'N° Asiento': row[headers.indexOf('N° Asiento')]||'',
+            'Tercero': String(row[headers.indexOf('Tercero')]||''),
+            'Descripción': String(row[headers.indexOf('Descripción')]||''),
+            'Cuenta Descripción': String(row[headers.indexOf('Cuenta Descripción')]||''),
+          });
+        }
+        return results;
+      }
+
+      if(s2025) wbData['Datos 2025'] = loadSheetFast(wb.Sheets[s2025], false);
+      if(s2026) wbData['Datos 2026'] = loadSheetFast(wb.Sheets[s2026], false);
+      if(s2024) {
+        wbData['Datos 2024'] = loadSheetFast(wb.Sheets[s2024], false);
+        console.log('Datos 2024:', wbData['Datos 2024'].length, 'filas cargadas');
+      }
+      if(s2023){
+        const raw23=XLSX.utils.sheet_to_json(wb.Sheets[s2023]);
+        raw23.forEach(r=>{
+          if(!r['Resultado'])       r['Resultado']      =r['RESULTADO']||r['RESULTADO 2']||'';
+          if(!r['ERI Detallado'])   r['ERI Detallado']  =r['ERI DETALLADO']||r['ERI']||'';
+          if(!r['Ceco / Proyecto']) r['Ceco / Proyecto']=r['Ceco/ID Proyecto (T)']||r['Ceco/ID Proyecto - Nombre']||r['Ceco/ID Proyecto']||'';
+          if(!r['Periodo']){ const f=r['FECHA     ']||''; r['Periodo']=f?String(f).slice(0,7):''; }
+          if(!r['Tercero'])         r['Tercero']        ='';
+          if(!r['Tipo de asiento']) r['Tipo de asiento']='';
+          if(!r['N° Asiento'])      r['N° Asiento']     =r['CC SCC  ']||'';
+          if(!r['Valor'])           r['Valor']          =r['Valor']||0;
+        });
+        wbData['Datos a 2023']=raw23;
+      }
+      if(wb.SheetNames.includes('Vigencia')) wbData['Vigencia']=XLSX.utils.sheet_to_json(wb.Sheets['Vigencia']);
+      if(wb.SheetNames.includes('Vigencia')) wbData['Vigencia'] = XLSX.utils.sheet_to_json(wb.Sheets['Vigencia']);
+
+      console.log('Hojas cargadas:', Object.keys(wbData).map(k=>k+':'+wbData[k].length+'filas').join(', '));
       const all=getAll();
       allP=[...new Set(all.map(r=>r['Periodo']).filter(Boolean))].sort();
       console.log('Loaded rows:', Object.values(wbData).reduce((s,a)=>s+a.length,0));
@@ -875,6 +960,8 @@ function handleFile(f){
 }
 
 function buildSelects(){
+  // Reconstruir allP desde las 4 hojas
+  allP=[...new Set(getAll().map(r=>r['Periodo']).filter(Boolean))].sort();
   const ops=allP.map(p=>`<option value="${p}">${p}</option>`).join('');
   ['p1s','p2s','r1d','r1h','r2d','r2h'].forEach(id=>{ const el=document.getElementById(id); if(el) el.innerHTML=ops; });
   const last=allP[allP.length-1], prev=allP.length>1?allP[allP.length-2]:allP[0];
@@ -1090,7 +1177,8 @@ function renderResults(){
       <div class="view-tabs" id="view-tabs">
         <button class="vtab ${currentView==='eri'?'active':''}" onclick="switchView('eri',this)">ERI Comparativo</button>
         <button class="vtab ${currentView==='proyectos'?'active':''}" onclick="switchView('proyectos',this)">Proyectos</button>
-        <button class="vtab ${currentView==='ia'?'active':''}" onclick="switchView('ia',this)">Análisis IA</button>
+        <button class="vtab ${currentView==='vigencia'?'active':''}" onclick="switchView('vigencia',this)">📋 Vigencia</button>
+        <button class="vtab ${currentView==='ia'?'active':''}" onclick="switchView('ia',this)">💬 Análisis IA</button>
       </div>
       <div id="view-content"></div>
     </div>`;
@@ -1128,6 +1216,7 @@ function renderView(){
   if(!cont) return;
   if(currentView==='eri') cont.innerHTML=buildERI();
   else if(currentView==='proyectos') cont.innerHTML=buildProjects();
+  else if(currentView==='vigencia') cont.innerHTML=buildVigencia();
   else cont.innerHTML=buildAI();
 }
 
@@ -1135,9 +1224,9 @@ function renderView(){
 // FORMAT HELPERS
 // ═══════════════════════════════════════════
 function fmtM(n,sign=true){
-  const abs=(Math.abs(n)/1e6).toFixed(1)+'M';
-  if(!sign) return (n<0?'-':'')+abs;
-  return(n>=0?'+':'')+abs;
+  const s=(Math.abs(n)/1e6).toFixed(1)+'M';
+  if(!sign) return s;
+  return(n>=0?'+':'-')+s;
 }
 function fmtPct(n){ if(!isFinite(n)||n===null) return'—'; return(n>=0?'+':'')+n.toFixed(1)+'%'; }
 function lvl(diff,pct){ const a=Math.abs(diff)/1e6,p=Math.abs(pct||0); return(a>=200||p>=60)?'alta':(a>=80||p>=30)?'media':'baja'; }
@@ -1536,6 +1625,226 @@ function buildERI(){
 // ═══════════════════════════════════════════
 // PROJECTS VIEW
 // ═══════════════════════════════════════════
+
+// ═══════════════════════════════════════════
+// VIGENCIA
+// ═══════════════════════════════════════════
+let vigFilter='';
+let vigSort={col:null,dir:1};
+
+function setVigFilter(v){
+  vigFilter=v;
+  const el=document.activeElement;
+  const pos=el&&el.selectionStart!=null?el.selectionStart:null;
+  const id=el?el.id||el.getAttribute('data-id'):null;
+  renderView();
+  if(id){
+    const restored=document.getElementById(id)||document.querySelector('[data-id="'+id+'"]');
+    if(restored){ restored.focus(); if(pos!=null&&restored.setSelectionRange) restored.setSelectionRange(pos,pos); }
+  }
+}
+function setVigSort(col){
+  if(vigSort.col===col) vigSort.dir*=-1;
+  else vigSort={col,dir:1};
+  renderView();
+}
+
+function buildVigencia(){
+  const PROJ_RE=/^[A-Z]{2,5}\d{5}-\d{3}$/;
+
+  // Las 4 hojas con sus keys de acceso en wbData
+  const SHEETS=[
+    {label:'hasta2023', display:'Acum. a 2023', key:'Datos a 2023'},
+    {label:'y2024',     display:'2024',          key:'Datos 2024'},
+    {label:'y2025',     display:'2025',          key:'Datos 2025'},
+    {label:'y2026',     display:'2026',          key:'Datos 2026'},
+  ];
+  const CLIENTE_MAP={
+    'AIR':'Air-e','AFN':'Afinia','AAA':'Triple A','ACU':'AcuaCAR',
+    'EDM':'Edemet','EDF':'EDF','JBE':'Jubeau','GRE':'Grenergy',
+    'PCH':'Powerchina','UNA':'UNAL','CDN':'Consorcio','MMN':'Conso.Int.',
+    'CDV':'CDV','ACO':'Acol'
+  };
+
+  // Acumular datos por proyecto y por período
+  const projMap={};
+  SHEETS.forEach(({label,key})=>{
+    const rows=wbData[key]||[];
+    rows.forEach(row=>{
+      // Usar 'ID Ceco / Proyecto' primero (limpio y confiable)
+      const idRaw=(row['ID Ceco / Proyecto']||'').toString().trim();
+      const raw=(row['Ceco / Proyecto']||'').toString();
+      // El id: primero 'ID Ceco / Proyecto', fallback a split de 'Ceco / Proyecto'
+      const id=idRaw&&PROJ_RE.test(idRaw)?idRaw:raw.split(' - ')[0].trim();
+      // Nombre: de 'Ceco / Proyecto' después del guión, o vacío
+      const nombre=raw.includes(' - ')?raw.split(' - ').slice(1).join(' - ').trim():'';
+      if(!PROJ_RE.test(id)) return;
+      if(!projMap[id]){
+        const pref=id.slice(0,3);
+        projMap[id]={id,nombre,año:'20'+id.slice(3,5),cliente:CLIENTE_MAP[pref]||pref,data:{}};
+      }
+      if(!projMap[id].data[label]) projMap[id].data[label]={ing:0,cost:0};
+      const v=parseFloat(row['Valor'])||0;
+      const res=(row['Resultado']||'').toString();
+      if(res.startsWith('01')) projMap[id].data[label].ing+=(-v);
+      else if(res.startsWith('02')||res.startsWith('03')) projMap[id].data[label].cost+=v;
+    });
+  });
+
+  // Totales por proyecto
+  let rows=Object.values(projMap).map(p=>{
+    let ti=0,tc=0;
+    SHEETS.forEach(({label})=>{
+      const d=p.data[label]||{ing:0,cost:0};
+      ti+=d.ing; tc+=d.cost;
+    });
+    const tr=ti-tc;
+    const mp=ti?((tr/ti)*100):0;
+    return {...p,ti,tc,tr,mp};
+  }).sort((a,b)=>b.ti-a.ti);
+
+  // Filtro búsqueda
+  if(vigFilter){
+    const q=vigFilter.toLowerCase();
+    rows=rows.filter(p=>p.id.toLowerCase().includes(q)||p.nombre.toLowerCase().includes(q)||p.cliente.toLowerCase().includes(q));
+  }
+  // Sort columna
+  if(vigSort.col){
+    rows=[...rows].sort((a,b)=>{
+      const va=a[vigSort.col]??0,vb=b[vigSort.col]??0;
+      return (typeof va==='number'?(va-vb):String(va).localeCompare(String(vb)))*vigSort.dir;
+    });
+  }
+
+  // KPIs
+  const total=rows.length;
+  const act26=rows.filter(p=>(p.data['2026']||{}).ing>0).length;
+  const negMar=rows.filter(p=>p.tr<0).length;
+  const ingTotal=rows.reduce((s,p)=>s+p.ti,0);
+
+  // Helpers formato
+  const fv=(v,bold,colored)=>{
+    if(!v) return '<span style="color:var(--ink4);">—</span>';
+    const abs=(Math.abs(v)/1e6).toFixed(1)+'M';
+    const neg=v<0;
+    const col=colored?(neg?'color:#e53e3e':'color:#276749'):'color:inherit';
+    const fw=bold?'font-weight:700':'';
+    return `<span style="${col};${fw}">${neg?'-':''}${abs}</span>`;
+  };
+
+  // CSS td/th reutilizable
+  const tdN='padding:5px 7px;text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap;border-left:1px solid rgba(0,0,0,.04);';
+  const tdG='padding:5px 7px;text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap;font-weight:600;border-left:2px solid rgba(0,0,0,.12);';
+  const thBase='color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:5px 7px;white-space:nowrap;border:none;text-align:right;';
+
+  // Colores de año para headers
+  const YR_COLORS=['rgba(70,100,140,.8)','rgba(13,100,50,.7)','rgba(13,100,50,.9)','rgba(13,115,50,1)'];
+  const TOT_COLOR='rgba(10,25,60,.95)';
+
+  // Generar filas de datos por año
+  const yearTd=(p,label)=>{
+    const d=p.data[label]||{ing:0,cost:0};
+    const r=d.ing-d.cost;
+    return `<td style="${tdN}">${fv(d.ing,false,false)}</td>`+
+           `<td style="${tdN}">${fv(d.cost,false,false)}</td>`+
+           `<td style="${tdN}">${fv(r,true,true)}</td>`;
+  };
+
+  // Totales pie de tabla por columna de año
+  const footYear=(label)=>{
+    const si=rows.reduce((s,p)=>s+(p.data[label]||{ing:0}).ing,0);
+    const sc=rows.reduce((s,p)=>s+(p.data[label]||{cost:0}).cost,0);
+    const sr=si-sc;
+    const mp=si?((sr/si)*100):0;
+    return `<td style="${tdN}color:#fff;">${si?(si/1e6).toFixed(0)+'M':'—'}</td>`+
+           `<td style="${tdN}color:rgba(255,255,255,.7);">${sc?(sc/1e6).toFixed(0)+'M':'—'}</td>`+
+           `<td style="${tdN}font-weight:700;color:${sr>=0?'#9bc534':'#ff8080'};">${(sr/1e6).toFixed(0)}M</td>`;
+  };
+
+  const tc=rows.reduce((s,p)=>s+p.tc,0);
+  const tr=ingTotal-tc;
+  const mpTotal=ingTotal?((tr/ingTotal)*100):0;
+
+  return `<div style="padding:.5rem 0 1.5rem;">
+    <!-- KPIs -->
+    <div class="kpi-row" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:1.25rem;">
+      <div class="kpi"><div class="kpi-label">Proyectos</div><div class="kpi-value">${total}</div></div>
+      <div class="kpi"><div class="kpi-label">Activos en 2026</div><div class="kpi-value" style="color:var(--ises-corp);">${act26}</div></div>
+      <div class="kpi"><div class="kpi-label">Margen negativo</div><div class="kpi-value dn">${negMar}</div></div>
+      <div class="kpi"><div class="kpi-label">Ingreso acumulado</div><div class="kpi-value" style="font-size:16px;">${(ingTotal/1e9).toFixed(1)}B</div></div>
+    </div>
+
+    <!-- Buscador -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <div style="position:relative;flex:1;max-width:380px;">
+        <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--ink3);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="vig-search-input" data-id="vig-search-input"
+          placeholder="Buscar proyecto, cliente..." value="${vigFilter}"
+          oninput="setVigFilter(this.value)"
+          style="width:100%;padding:7px 10px 7px 32px;border:1.5px solid var(--border);border-radius:var(--r);font-size:12px;font-family:var(--font);color:var(--ink);background:var(--surface);box-sizing:border-box;">
+      </div>
+      <span style="font-size:11px;color:var(--ink3);">${rows.length} de ${Object.keys(projMap).length} proyectos</span>
+    </div>
+
+    <!-- Tabla -->
+    <div style="background:var(--surface);border-radius:var(--r-lg);border:1px solid var(--border);overflow:hidden;box-shadow:var(--shadow);">
+    <div style="overflow-x:auto;">
+    <table style="border-collapse:collapse;width:100%;min-width:1100px;">
+      <thead>
+        <!-- Fila 1: grupos de año -->
+        <tr style="background:#0d1f40;">
+          <th rowspan="2" style="${thBase}text-align:left;min-width:180px;vertical-align:bottom;">Proyecto</th>
+          <th rowspan="2" style="${thBase}text-align:center;vertical-align:bottom;">Cliente</th>
+          <th rowspan="2" style="${thBase}text-align:center;vertical-align:bottom;">Año</th>
+          ${SHEETS.map(({display},i)=>`<th colspan="3" style="${thBase}text-align:center;background:${YR_COLORS[i]};border-left:2px solid rgba(255,255,255,.2);">${display}</th>`).join('')}
+          <th colspan="4" style="${thBase}text-align:center;background:${TOT_COLOR};border-left:2px solid rgba(255,255,255,.25);">Total acumulado</th>
+        </tr>
+        <!-- Fila 2: sub-columnas -->
+        <tr style="background:#1a3560;">
+          ${SHEETS.map(({label},i)=>`<th style="${thBase}background:${YR_COLORS[i]};border-left:${i===0?'2px':'1px'} solid rgba(255,255,255,.2);">Ing.</th><th style="${thBase}background:${YR_COLORS[i]};">Cost.</th><th style="${thBase}background:${YR_COLORS[i]};">Res.</th>`).join('')}
+          <th style="${thBase}background:${TOT_COLOR};border-left:2px solid rgba(255,255,255,.25);">Ing.</th>
+          <th style="${thBase}background:${TOT_COLOR};">Cost.</th>
+          <th style="${thBase}background:${TOT_COLOR};">Res.</th>
+          <th style="${thBase}background:${TOT_COLOR};">Mar.%</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((p,i)=>{
+          const bg=i%2===0?'':'background:#f7fbf7;';
+          const negBg=p.tr<0?'background:#fff5f5;':'';
+          return `<tr style="${bg}${negBg}">
+            <td style="padding:5px 8px;font-weight:600;color:var(--ises-navy);font-size:11px;white-space:nowrap;">
+              <span style="font-family:var(--mono);">${p.id}</span>
+              <div style="font-weight:400;font-size:10px;color:var(--ink3);max-width:180px;overflow:hidden;text-overflow:ellipsis;">${p.nombre}</div>
+            </td>
+            <td style="padding:5px 6px;font-size:10px;text-align:center;color:var(--ink2);white-space:nowrap;">${p.cliente}</td>
+            <td style="padding:5px 6px;font-size:10px;text-align:center;color:var(--ink3);font-family:var(--mono);">${p.año}</td>
+            ${SHEETS.map(({label})=>yearTd(p,label)).join('')}
+            <td style="${tdG}">${fv(p.ti,true,false)}</td>
+            <td style="${tdG}color:var(--ink3);">${fv(p.tc,false,false)}</td>
+            <td style="${tdG}">${fv(p.tr,true,true)}</td>
+            <td style="${tdG}font-size:10px;color:${p.mp>=0?'var(--green)':'var(--red)'};">${p.ti?p.mp.toFixed(1)+'%':'—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+      <tfoot>
+        <tr style="background:var(--ises-navy);">
+          <td colspan="3" style="color:#fff;font-weight:700;font-size:11px;padding:7px 8px;">TOTAL (${rows.length} proyectos)</td>
+          ${SHEETS.map(({label})=>footYear(label)).join('')}
+          <td style="${tdG}color:#fff;">${(ingTotal/1e6).toFixed(0)}M</td>
+          <td style="${tdG}color:rgba(255,255,255,.7);">${(tc/1e6).toFixed(0)}M</td>
+          <td style="${tdG}color:${tr>=0?'#9bc534':'#ff8080'};font-weight:800;">${(tr/1e6).toFixed(0)}M</td>
+          <td style="${tdG}color:${mpTotal>=0?'#9bc534':'#ff8080'};font-size:10px;">${ingTotal?mpTotal.toFixed(1)+'%':'—'}</td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+    </div>
+  </div>`;
+}
+
+
+
 function buildProjects(){
   const{labelA,labelB,r1all,r2all,thM,thP}=_state;
   const r1=filterByEntity(r1all,currentEntity,currentConsorcio);
@@ -1556,13 +1865,31 @@ function buildProjects(){
     return{proj,t1,t2,c1,c2,m1,m2,mp1,mp2,diff,pct,
       absM:Math.abs(diff)/1e6,
       nuevo:t2===0&&t1!==0,desap:t1===0&&t2!==0,
-      marginNeg:(mp1!==null&&mp1<0)||(t1===0&&c1>0),
+      marginNeg:mp1!==null&&mp1<0,
       entidad
     };
-  }).filter(p=>p.t1!==0||p.t2!==0||p.c1!==0||p.c2!==0);
+  }).filter(p=>p.t1>0||p.t2>0);
 
-  // sort
-  if(currentSort==='ingreso') rows.sort((a,b)=>Math.abs(b.t1)-Math.abs(a.t1));
+  // filtro búsqueda
+  if(projSearch){
+    const q=projSearch.toLowerCase();
+    rows=rows.filter(p=>p.proj.toLowerCase().includes(q));
+  }
+
+  // ordenamiento por columna
+  const colSortMap={
+    'ingreso': (a,b)=>projColSort.dir*(b.t1-a.t1),
+    'fact':    (a,b)=>projColSort.dir*((pm1[b.proj]?pm1[b.proj].fact:0)-(pm1[a.proj]?pm1[a.proj].fact:0)),
+    'wip':     (a,b)=>projColSort.dir*((pm1[b.proj]?pm1[b.proj].wip:0)-(pm1[a.proj]?pm1[a.proj].wip:0)),
+    'costo':   (a,b)=>projColSort.dir*(b.c1-a.c1),
+    'margen':  (a,b)=>projColSort.dir*(b.m1-a.m1),
+    'margenp': (a,b)=>projColSort.dir*((b.mp1||0)-(a.mp1||0)),
+    'ing2':    (a,b)=>projColSort.dir*(b.t2-a.t2),
+    'var':     (a,b)=>projColSort.dir*(b.diff-a.diff),
+    'proj':    (a,b)=>projColSort.dir*a.proj.localeCompare(b.proj),
+  };
+  if(colSortMap[projColSort.col]) rows.sort(colSortMap[projColSort.col]);
+  else if(currentSort==='ingreso') rows.sort((a,b)=>Math.abs(b.t1)-Math.abs(a.t1));
   else if(currentSort==='margen') rows.sort((a,b)=>(a.mp1||0)-(b.mp1||0));
   else if(currentSort==='variacion') rows.sort((a,b)=>Math.abs(b.diff)-Math.abs(a.diff));
 
@@ -1584,7 +1911,6 @@ function buildProjects(){
   };
 
   const projStatus=(p)=>{
-    if(p.t1===0&&p.c1>0) return `<span class="badge badge-alta">Sin ingreso</span>`;
     if(p.nuevo) return `<span class="badge badge-nueva">Nuevo</span>`;
     if(p.desap) return `<span class="badge badge-desap">Inactivo</span>`;
     if(Math.abs(p.diff)/1e6<3) return `<span class="badge badge-baja" style="background:var(--surface3);color:var(--ink3);">Estable</span>`;
@@ -1600,8 +1926,14 @@ function buildProjects(){
   </div>`;
 
   return kpis + `<div class="proj-table-card">
-    <div class="proj-table-toolbar">
-      <span class="toolbar-label">Ordenar por:</span>
+    <div class="proj-table-toolbar" style="flex-wrap:wrap;gap:8px;">
+      <div style="position:relative;flex:1;min-width:220px;max-width:340px;">
+        <svg style="position:absolute;left:9px;top:50%;transform:translateY(-50%);width:13px;height:13px;color:var(--ink3);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="proj-search-input" data-id="proj-search-input" placeholder="Buscar proyecto..." value="${projSearch}"
+          oninput="setProjSearch(this.value)"
+          style="width:100%;padding:6px 10px 6px 30px;border:1.5px solid var(--border);border-radius:var(--r);font-size:11px;font-family:var(--font);color:var(--ink);background:var(--surface);box-sizing:border-box;">
+      </div>
+      <span class="toolbar-label" style="display:flex;align-items:center;">Agrupar:</span>
       <button class="sort-btn ${currentSort==='ingreso'?'active':''}" onclick="setSort('ingreso')">Ingreso</button>
       <button class="sort-btn ${currentSort==='margen'?'active':''}" onclick="setSort('margen')">Margen %</button>
       <button class="sort-btn ${currentSort==='variacion'?'active':''}" onclick="setSort('variacion')">Variación</button>
@@ -1610,20 +1942,21 @@ function buildProjects(){
           ▼ Solo margen negativo (${negCount})
         </button>
       </div>
+      <span style="font-size:11px;color:var(--ink3);display:flex;align-items:center;">${rows.length} proyectos${projSearch?' encontrados':''}</span>
     </div>
     <div style="overflow-x:auto;">
     <table class="ptbl">
       <thead><tr>
-        <th onclick="setSort('nombre')">Proyecto</th>
-        <th onclick="setSort('ingreso')">${labelA} Ing.</th>
-        <th>${labelA} Fact.</th>
-        <th>${labelA} WIP</th>
-        <th>${labelA} Costo</th>
-        <th onclick="setSort('margen')">${labelA} Margen</th>
-        <th>${labelA} Margen%</th>
-        <th>${labelB} Ing.</th>
-        <th onclick="setSort('variacion')">Variación</th>
-        <th>%</th>
+        <th onclick="setProjColSort('proj')" style="cursor:pointer;">Proyecto${projColSort.col==='proj'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th onclick="setProjColSort('ingreso')" style="cursor:pointer;text-align:right;">${labelA} Ing.${projColSort.col==='ingreso'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th style="text-align:right;">${labelA} Fact.</th>
+        <th style="text-align:right;">${labelA} WIP</th>
+        <th onclick="setProjColSort('costo')" style="cursor:pointer;text-align:right;">${labelA} Costo${projColSort.col==='costo'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th onclick="setProjColSort('margen')" style="cursor:pointer;text-align:right;">${labelA} Margen${projColSort.col==='margen'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th onclick="setProjColSort('margenp')" style="cursor:pointer;text-align:right;">Margen%${projColSort.col==='margenp'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th onclick="setProjColSort('ing2')" style="cursor:pointer;text-align:right;">${labelB} Ing.${projColSort.col==='ing2'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th onclick="setProjColSort('var')" style="cursor:pointer;text-align:right;">Variación${projColSort.col==='var'?(projColSort.dir>0?' ▲':' ▼'):' ⇅'}</th>
+        <th style="text-align:right;">%</th>
         <th>Estado</th>
         <th>Margen</th>
       </tr></thead>
@@ -1659,6 +1992,24 @@ function buildProjects(){
 }
 
 function setSort(s){ currentSort=s; renderView(); }
+function setProjSearch(v){
+  projSearch=v;
+  // Guardar posición del cursor antes de re-render
+  const el=document.activeElement;
+  const pos=el&&el.selectionStart!=null?el.selectionStart:null;
+  const id=el?el.id||el.getAttribute('data-id'):null;
+  renderView();
+  // Restaurar foco y posición
+  if(id){
+    const restored=document.getElementById(id)||document.querySelector('[data-id="'+id+'"]');
+    if(restored){ restored.focus(); if(pos!=null&&restored.setSelectionRange) restored.setSelectionRange(pos,pos); }
+  }
+}
+function setProjColSort(col){
+  if(projColSort.col===col) projColSort.dir*=-1;
+  else projColSort={col,dir:-1};
+  renderView();
+}
 function toggleNegFilter(){ showOnlyNeg=!showOnlyNeg; renderView(); }
 
 // ═══════════════════════════════════════════
@@ -1667,33 +2018,330 @@ function toggleNegFilter(){ showOnlyNeg=!showOnlyNeg; renderView(); }
 // Store AI result so it persists across tab switches
 let _aiResultHTML = null;
 let _aiResultKey  = null; // key = labelA+labelB+entity to detect when data changes
+let _chatMessages = []; // historial del chat [{role,content,html}]
+let _chatLoading  = false;
 
 function buildAI(){
   const{labelA,labelB}=_state;
   const currentKey=labelA+'|'+labelB+'|'+currentEntity+'|'+currentConsorcio;
 
-  // If result exists for the same analysis, restore it
-  const savedBody = (_aiResultKey===currentKey && _aiResultHTML)
-    ? _aiResultHTML
-    : '<p class="ai-placeholder">Haga clic en "Generar análisis" para obtener el análisis gerencial con IA.</p>';
+  if(_aiResultKey && _aiResultKey!==currentKey){
+    _chatMessages=[];
+    _aiResultHTML=null;
+  }
+  _aiResultKey=currentKey;
 
-  return `<div class="ai-section">
-    <div class="ai-header">
-      <div class="ai-header-left">
-        <div class="ai-pulse"></div>
-        <div>
-          <div class="ai-header-title">Análisis gerencial con IA</div>
-          <div class="ai-header-sub">${labelA} vs ${labelB} · ${currentEntity==='all'?'Consolidado':currentEntity}</div>
+  // ── Chat messages HTML
+  const chatHTML=_chatMessages.length===0?`
+    <div style="text-align:center;padding:2rem 1rem;color:var(--ink3);">
+      <div style="font-size:36px;margin-bottom:8px;">💬</div>
+      <div style="font-size:12px;font-weight:600;color:var(--ink);margin-bottom:6px;">Chat de consultas</div>
+      <div style="font-size:11px;margin-bottom:14px;">Haga preguntas específicas sobre los datos del periodo analizado</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-width:460px;margin:0 auto;">
+        ${['¿Cuáles proyectos tienen margen negativo?','Dame transacciones sospechosas por tercero nuevo','Analiza concentración por cliente','¿Gastos admin vs ingresos?','Proyectos sin costo — posible error'].map(s=>`
+          <button onclick="sendQuickPrompt('${s}')"
+            style="background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;padding:5px 12px;font-size:10px;font-family:var(--font);color:var(--ink);cursor:pointer;"
+            onmouseover="this.style.borderColor='var(--ises-lima)';this.style.color='var(--ises-corp)';"
+            onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--ink)';"
+          >${s}</button>`).join('')}
+      </div>
+    </div>`:
+  _chatMessages.map(m=>{
+    if(m.role==='user') return `
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+        <div style="max-width:75%;background:var(--ises-navy);color:#fff;padding:9px 13px;border-radius:12px 12px 3px 12px;font-size:12px;line-height:1.5;">${m.content}</div>
+      </div>`;
+    return `
+      <div style="display:flex;gap:8px;margin-bottom:14px;align-items:flex-start;">
+        <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#61b443,#0cc0df);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:11px;">🤖</div>
+        <div style="flex:1;background:var(--surface);border:1px solid var(--border);padding:10px 13px;border-radius:3px 12px 12px 12px;font-size:12px;line-height:1.6;color:var(--ink);">${m.html||m.content}</div>
+      </div>`;
+  }).join('');
+
+  const loadingDots=_chatLoading?`
+    <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:10px;">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#61b443,#0cc0df);display:flex;align-items:center;justify-content:center;font-size:11px;">🤖</div>
+      <div style="background:var(--surface);border:1px solid var(--border);padding:10px 13px;border-radius:3px 12px 12px 12px;">
+        <span style="display:inline-flex;gap:3px;">
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--ises-lima);animation:bounce .8s infinite .0s;display:inline-block;"></span>
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--ises-lima);animation:bounce .8s infinite .15s;display:inline-block;"></span>
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--ises-lima);animation:bounce .8s infinite .3s;display:inline-block;"></span>
+        </span>
+      </div>
+    </div>`:'';
+
+  return `
+  <!-- ════════════════════════════════════════════════
+       SECCIÓN IA — DOS APARTADOS
+       ════════════════════════════════════════════════ -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;height:calc(100vh - 180px);min-height:460px;">
+
+    <!-- ══ APARTADO 1: ANÁLISIS AUTOMÁTICO ══ -->
+    <div style="display:flex;flex-direction:column;background:var(--surface);border-radius:var(--r-lg);border:1px solid var(--border);overflow:hidden;box-shadow:var(--shadow);">
+
+      <!-- Header análisis -->
+      <div style="background:var(--ises-navy);border-left:4px solid var(--ises-lima);padding:12px 16px;flex-shrink:0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="color:#fff;font-size:12px;font-weight:700;font-family:var(--font);">📊 Análisis Gerencial</div>
+            <div style="color:rgba(255,255,255,.6);font-size:10px;margin-top:2px;">${labelA} vs ${labelB}</div>
+          </div>
+          <button id="ai-run-btn" class="ai-run-btn" onclick="runAI()">
+            ${_aiResultHTML?'↺ Regenerar':'Generar análisis →'}
+          </button>
         </div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        ${_aiResultKey===currentKey&&_aiResultHTML?'<button class="ai-run-btn" onclick="runAI()" style="background:rgba(255,255,255,.12);font-size:11px;padding:5px 12px;">↺ Regenerar</button>':''}
-        <button class="ai-run-btn" id="ai-run-btn" onclick="runAI()">${_aiResultKey===currentKey&&_aiResultHTML?'Nuevo análisis →':'Generar análisis →'}</button>
+
+      <!-- Cuerpo análisis -->
+      <div id="ai-body" style="flex:1;overflow-y:auto;padding:16px;">
+        ${_aiResultHTML||`
+          <div style="text-align:center;padding:2rem 1rem;color:var(--ink3);">
+            <div style="font-size:40px;margin-bottom:12px;">📊</div>
+            <div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:8px;">Análisis gerencial con IA</div>
+            <div style="font-size:11px;color:var(--ink3);margin-bottom:16px;">Hallazgos por área · Alertas críticas · Recomendaciones</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;font-size:10px;color:var(--ink3);">
+              <span style="background:var(--red-bg);color:var(--red);padding:3px 8px;border-radius:12px;">🔴 Margen negativo</span>
+              <span style="background:var(--amber-bg);color:var(--amber);padding:3px 8px;border-radius:12px;">🟡 Gastos admin >12%</span>
+              <span style="background:var(--blue-bg);color:var(--blue);padding:3px 8px;border-radius:12px;">ℹ️ WIP acumulado</span>
+            </div>
+          </div>`}
       </div>
     </div>
-    <div class="ai-body" id="ai-body">${savedBody}</div>
+
+    <!-- ══ APARTADO 2: CHAT DE CONSULTAS ══ -->
+    <div style="display:flex;flex-direction:column;background:var(--surface);border-radius:var(--r-lg);border:1px solid var(--border);overflow:hidden;box-shadow:var(--shadow);">
+
+      <!-- Header chat -->
+      <div style="background:var(--ises-navy);border-left:4px solid #0cc0df;padding:12px 16px;flex-shrink:0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="color:#fff;font-size:12px;font-weight:700;font-family:var(--font);">💬 Chat de Consultas</div>
+            <div style="color:rgba(255,255,255,.6);font-size:10px;margin-top:2px;">Pregunta lo que necesites sobre los datos</div>
+          </div>
+          ${_chatMessages.length>0?`<button class="ai-run-btn" onclick="clearChat()" style="font-size:10px;padding:4px 10px;background:rgba(255,255,255,.12);">🗑 Limpiar</button>`:''}
+        </div>
+      </div>
+
+      <!-- Mensajes -->
+      <div id="ai-chat-body" style="flex:1;overflow-y:auto;padding:14px;background:var(--surface2);">
+        ${chatHTML}
+        ${loadingDots}
+      </div>
+
+      <!-- Input -->
+      <div style="flex-shrink:0;padding:10px 14px;background:var(--surface);border-top:1px solid var(--border);">
+        <div style="display:flex;gap:8px;align-items:flex-end;">
+          <textarea id="ai-chat-input"
+            placeholder="Escribe tu pregunta... (Enter envía, Shift+Enter nueva línea)"
+            rows="2"
+            style="flex:1;padding:8px 11px;border:1.5px solid var(--border);border-radius:var(--r);font-size:11px;font-family:var(--font);color:var(--ink);background:var(--surface);resize:none;line-height:1.5;transition:border-color .15s;"
+            onfocus="this.style.borderColor='var(--ises-lima)'"
+            onblur="this.style.borderColor='var(--border)'"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"
+          ></textarea>
+          <button onclick="sendChat()"
+            style="padding:8px 16px;background:var(--ises-corp);color:#fff;border:none;border-radius:var(--r);font-size:11px;font-family:var(--font);font-weight:600;cursor:pointer;white-space:nowrap;height:54px;"
+            onmouseover="this.style.background='var(--ises-verde)'"
+            onmouseout="this.style.background='var(--ises-corp)'"
+          >Enviar →</button>
+        </div>
+      </div>
+    </div>
+
   </div>`;
 }
+
+
+function clearChat(){
+  _chatMessages=[];
+  _aiResultHTML=null;
+  renderView();
+}
+
+function sendQuickPrompt(text){
+  const ta=document.getElementById('ai-chat-input');
+  if(ta) ta.value=text;
+  sendChat();
+}
+
+function sendChat(){
+  if(_chatLoading) return;
+  const ta=document.getElementById('ai-chat-input');
+  const userMsg=(ta?ta.value:'').trim();
+  if(!userMsg) return;
+  if(ta) ta.value='';
+
+  _chatMessages.push({role:'user',content:userMsg});
+  _chatLoading=true;
+  renderView();
+
+  // Scroll al fondo
+  setTimeout(()=>{
+    const body=document.getElementById('ai-chat-body');
+    if(body) body.scrollTop=body.scrollHeight;
+  },50);
+
+  // Usar buildAIPrompt() como contexto completo del chat
+  // Tiene todos los datos: gastos admin, terceros, WIP, proyectos, costos huerfanos
+  let sysPrompt = '';
+  try {
+    sysPrompt = buildAIPrompt();
+    // Reemplazar instruccion de JSON al final por instruccion de chat libre
+    const jsonIdx = sysPrompt.lastIndexOf('RESPONDE ÚNICAMENTE con este JSON');
+    if(jsonIdx > 0){
+      sysPrompt = sysPrompt.slice(0, jsonIdx) +
+        'Responde de forma conversacional y directa. ' +
+        'Usa cifras concretas de los datos. ' +
+        'Montos en formato 450M (millones) o 23.5B (billones COP). ' +
+        'Si algo es critico usa ⚠. Si es positivo usa ✅. ' +
+        'Usa bullets cuando ayuden. Maximo 300 palabras por respuesta.';
+    }
+  } catch(e) {
+    sysPrompt = 'Eres analista financiero de ISES. Responde en espanol con cifras concretas.';
+  }
+
+  // Historial ultimos 8 mensajes
+  const history=_chatMessages.slice(-8).map(m=>({
+    role: m.role==='user'?'user':'assistant',
+    content: m.role==='user'?m.content:(m.content||'')
+  }));
+
+  fetch('https://analizadorfinanciero.worldgncolombia.workers.dev/api/analyze',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      model:'claude-sonnet-4-6',
+      max_tokens:2000,
+      system: sysPrompt,
+      messages: history
+    })
+  })
+  .then(res=>{
+    if(!res.ok) return res.json().then(e=>{ throw new Error(e.error||'HTTP '+res.status); });
+    return res.json();
+  })
+  .then(data=>{
+    if(data.error) throw new Error(data.error);
+    const raw=(data.content&&data.content[0]&&data.content[0].text)||'Sin respuesta del modelo.';
+    const html=raw
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g,'<em>$1</em>')
+      .replace(/⚠️/g,'<span style="color:var(--red);">⚠️</span>')
+      .replace(/✅/g,'<span style="color:var(--green);">✅</span>')
+      .replace(/^[-•]\s+(.+)$/gm,'<div style="display:flex;gap:6px;margin:3px 0;"><span style="color:var(--ises-lima);flex-shrink:0;">▸</span><span>$1</span></div>')
+      .replace(/\n\n/g,'</p><p style="margin:8px 0;">')
+      .replace(/\n/g,'<br>');
+    _chatMessages.push({role:'assistant',content:raw,html:`<p style="margin:0;">${html}</p>`});
+    _chatLoading=false;
+    renderView();
+    setTimeout(()=>{
+      const body=document.getElementById('ai-chat-body');
+      if(body) body.scrollTop=body.scrollHeight;
+    },50);
+  })
+  .catch(err=>{
+    const msg=err.message||'Error desconocido';
+    _chatMessages.push({
+      role:'assistant',
+      content: msg,
+      html:`<div style="color:var(--red);display:flex;gap:8px;align-items:center;">
+        <span style="font-size:18px;">⚠️</span>
+        <div><strong>Error de conexión</strong><br><span style="font-size:11px;">${msg}</span><br>
+        <span style="font-size:10px;color:var(--ink3);margin-top:4px;display:block;">Verifique que el Worker de Cloudflare esté activo y la API key configurada.</span>
+        </div></div>`
+    });
+    _chatLoading=false;
+    renderView();
+  });
+}
+
+function buildFinancialContext(r1,r2,labelA,labelB){
+  const pm1=buildProjData(r1), pm2=buildProjData(r2);
+  const cm1=buildCostByProj(r1), cm2=buildCostByProj(r2);
+
+  const sumIng=(m)=>Object.values(m).reduce((s,p)=>s+p.total,0);
+  const sumCost=(m)=>Object.values(m).reduce((s,c)=>s+c,0);
+
+  const i1=sumIng(pm1), i2=sumIng(pm2);
+  const c1=sumCost(cm1), c2=sumCost(cm2);
+  const m1=i1-c1, m2=i2-c2;
+  const mp1=i1?((m1/i1)*100):0;
+
+  // ── Resumen financiero
+  const topProj=Object.values(pm1)
+    .filter(p=>p.total>0).sort((a,b)=>b.total-a.total).slice(0,10)
+    .map(p=>`  ${p.proj}: ing=${fmtM(p.total,false)}, costo=${fmtM(cm1[p.proj]||0,false)}, margen=${fmtM(p.total-(cm1[p.proj]||0),false)}`)
+    .join('\n');
+
+  const negProj=Object.values(pm1)
+    .map(p=>({...p,margen:p.total-(cm1[p.proj]||0)}))
+    .filter(p=>p.total>0&&p.margen<0)
+    .map(p=>`  ${p.proj}: margen=${fmtM(p.margen,false)}`)
+    .join('\n');
+
+  // ── Detalle transaccional de r1 (periodo A)
+  // Terceros únicos con sus totales
+  const tercMap={};
+  r1.forEach(r=>{
+    const t=(r['Tercero']||'SIN TERCERO').toString().trim();
+    const v=displayVal(r);
+    if(!tercMap[t]) tercMap[t]={total:0, count:0, resultado: r['Resultado']||''};
+    tercMap[t].total+=v;
+    tercMap[t].count++;
+  });
+
+  // Top terceros por monto absoluto
+  const topTerc=Object.entries(tercMap)
+    .sort((a,b)=>Math.abs(b[1].total)-Math.abs(a[1].total))
+    .slice(0,15)
+    .map(([t,d])=>`  ${t}: ${fmtM(d.total,false)} (${d.count} asientos, ${d.resultado.slice(0,15)})`)
+    .join('\n');
+
+  // Terceros que aparecen pocas veces (posibles nuevos/infrecuentes) — en costos
+  const tercCostos=Object.entries(tercMap)
+    .filter(([t,d])=>!d.resultado.startsWith('01') && d.count<=2 && Math.abs(d.total)>1e6)
+    .sort((a,b)=>Math.abs(b[1].total)-Math.abs(a[1].total))
+    .slice(0,10)
+    .map(([t,d])=>`  ${t}: ${fmtM(d.total,false)} (solo ${d.count} asiento(s))`)
+    .join('\n');
+
+  // ── Detalle de asientos — todos los de r1 (máx 200 para no exceder tokens)
+  const asientos=r1
+    .filter(r=>r['N° Asiento'])
+    .slice(0,200)
+    .map(r=>`  Asiento:${r['N° Asiento']} | ${r['Periodo']} | ${(r['Tipo de asiento']||'').trim()} | ${(r['Tercero']||'').slice(0,40)} | ${(r['Ceco / Proyecto']||'').slice(0,35)} | ${(r['Cuenta Descripción']||'').slice(0,35)} | ${(r['Descripción']||'').slice(0,30)} | ${fmtM(displayVal(r),false)}`)
+    .join('\n');
+
+  // ── Tipos de asiento disponibles
+  const tiposAsiento=[...new Set(r1.map(r=>r['Tipo de asiento']).filter(Boolean))].join(', ');
+
+  return `=== DATOS FINANCIEROS PERIODO A: ${labelA} vs PERIODO B: ${labelB} ===
+
+--- RESUMEN EJECUTIVO ---
+Ingresos A: ${fmtM(i1,false)} | Ingresos B: ${fmtM(i2,false)} | Variación: ${fmtM(i1-i2)}
+Costos directos A: ${fmtM(c1,false)} | Costos B: ${fmtM(c2,false)}
+Margen bruto A: ${fmtM(m1,false)} (${mp1.toFixed(1)}%) | Margen B: ${fmtM(m2,false)}
+Proyectos activos en A: ${Object.keys(pm1).length}
+Tipos de asiento en A: ${tiposAsiento}
+
+--- TOP PROYECTOS POR INGRESO (A) ---
+${topProj||'  (sin datos)'}
+
+--- PROYECTOS CON MARGEN NEGATIVO (A) ---
+${negProj||'  Ninguno'}
+
+--- TOP 15 TERCEROS POR MONTO ABSOLUTO (A) ---
+${topTerc||'  (sin datos)'}
+
+--- TERCEROS EN COSTOS CON POCOS ASIENTOS / POSIBLE ALERTA (A) ---
+${tercCostos||'  Ninguno detectado'}
+
+--- DETALLE TRANSACCIONAL (primeros 200 asientos de A) ---
+Formato: Asiento | Periodo | Tipo | Tercero | Proyecto | Cuenta | Descripción | Valor
+${asientos||'  (sin asientos)'}`;
+}
+
 
 
 function cleanLabel(v){
@@ -2045,7 +2693,7 @@ async function runAI(){
     let raw1='', raw2='';
     try{
       const data1=await callAPI(prompt1);
-      raw1=data1.text||'';
+      raw1=(data1.content&&data1.content[0]&&data1.content[0].text)||data1.text||'';
     }catch(err){
       showChatFallback(fullPrompt, err.message);
       btn.disabled=false;
@@ -2059,7 +2707,7 @@ async function runAI(){
 
     try{
       const data2=await callAPI(prompt2);
-      raw2=data2.text||'';
+      raw2=(data2.content&&data2.content[0]&&data2.content[0].text)||data2.text||'';
     }catch(err){
       raw2='{"alertas":[],"recomendaciones":[]}';
     }
