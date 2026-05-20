@@ -870,56 +870,11 @@ function handleFile(f){
       const s2024 = findSheet(dataSheets2024);
       const s2023 = findSheet(dataSheets2023);
 
-      const PROJ_RE_LOAD = /^[A-Z]{2,5}\d{5}-\d{3}$/;
-
-      // Leer hoja como arrays (header:1) y convertir a objetos
-      // Más eficiente en memoria que sheet_to_json directo para hojas grandes
-      function loadSheetFast(ws, filterByProj){
-        // Obtener rango de la hoja
-        const ref = ws['!ref'];
-        if(!ref) return [];
-        // Leer como array de arrays (mucho más rápido)
-        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
-        if(aoa.length < 2) return [];
-        const headers = aoa[0].map(h=>String(h||'').trim());
-        // Índices de columnas clave
-        const iRes  = headers.indexOf('Resultado');
-        const iCeco = headers.indexOf('Ceco / Proyecto');
-        const iID   = headers.indexOf('ID Ceco / Proyecto');
-        const iVal  = headers.indexOf('Valor');
-        const results = [];
-        for(let i=1; i<aoa.length; i++){
-          const row = aoa[i];
-          const id  = String(row[iID]||'').trim();
-          const ceco= String(row[iCeco]||'').trim();
-          // Para Vigencia solo necesitamos proyectos reales
-          const projId = PROJ_RE_LOAD.test(id) ? id : ceco.split(' - ')[0].trim();
-          if(filterByProj && !PROJ_RE_LOAD.test(projId)) continue;
-          results.push({
-            'Resultado': String(row[iRes]||''),
-            'Ceco / Proyecto': ceco,
-            'ID Ceco / Proyecto': projId,
-            'Valor': Number(row[iVal])||0,
-            // Para ERI también necesitamos estos campos
-            'ERI Detallado': String(row[headers.indexOf('ERI Detallado')]||''),
-            'ERI': String(row[headers.indexOf('ERI')]||''),
-            'Periodo': String(row[headers.indexOf('Periodo')]||''),
-            'Tipo de asiento': String(row[headers.indexOf('Tipo de asiento')]||''),
-            'N° Asiento': row[headers.indexOf('N° Asiento')]||'',
-            'Tercero': String(row[headers.indexOf('Tercero')]||''),
-            'Descripción': String(row[headers.indexOf('Descripción')]||''),
-            'Cuenta Descripción': String(row[headers.indexOf('Cuenta Descripción')]||''),
-          });
-        }
-        return results;
-      }
-
-      if(s2025) wbData['Datos 2025'] = loadSheetFast(wb.Sheets[s2025], false);
-      if(s2026) wbData['Datos 2026'] = loadSheetFast(wb.Sheets[s2026], false);
-      if(s2024) {
-        wbData['Datos 2024'] = loadSheetFast(wb.Sheets[s2024], false);
-        console.log('Datos 2024:', wbData['Datos 2024'].length, 'filas cargadas');
-      }
+      // Cargar todas las hojas con sheet_to_json estándar
+      // Esto garantiza que TODOS los campos se lean correctamente (ERI Detallado, etc.)
+      if(s2025){ badge.textContent='⏳ Cargando 2025...'; wbData['Datos 2025']=XLSX.utils.sheet_to_json(wb.Sheets[s2025],{defval:''}); }
+      if(s2026){ badge.textContent='⏳ Cargando 2026...'; wbData['Datos 2026']=XLSX.utils.sheet_to_json(wb.Sheets[s2026],{defval:''}); }
+      if(s2024){ badge.textContent='⏳ Cargando 2024 (archivo grande)...'; wbData['Datos 2024']=XLSX.utils.sheet_to_json(wb.Sheets[s2024],{defval:''}); }
       if(s2023){
         const raw23=XLSX.utils.sheet_to_json(wb.Sheets[s2023]);
         raw23.forEach(r=>{
@@ -2164,6 +2119,131 @@ function sendQuickPrompt(text){
   sendChat();
 }
 
+
+// ─── Contexto de cuentas contables para el chat ───────────
+function buildCuentasContext(r1, r2, labelA, labelB){
+  // ── 1. Top 40 cuentas contables PUC por monto en periodo A
+  const byCuenta = (rows) => {
+    const m = {};
+    rows.forEach(r => {
+      const cta  = (r['Cuenta Descripción'] || '').toString().trim();
+      const proj = (r['Ceco / Proyecto']    || '').toString().trim();
+      const v    = displayVal(r);
+      if(!cta) return;
+      if(!m[cta]) m[cta] = { total: 0, proyectos: {}, resultado: r['Resultado']||'' };
+      m[cta].total += v;
+      m[cta].proyectos[proj] = (m[cta].proyectos[proj]||0) + v;
+    });
+    return m;
+  };
+  const c1 = byCuenta(r1);
+  const c2 = byCuenta(r2);
+
+  const top = Object.entries(c1)
+    .sort((a,b) => Math.abs(b[1].total) - Math.abs(a[1].total))
+    .slice(0, 40);
+
+  const cuentaLines = top.map(([cta, d]) => {
+    const v1 = d.total, v2 = (c2[cta]||{}).total||0;
+    const diff = v1 - v2;
+    const pct  = v2 ? ((diff/Math.abs(v2))*100).toFixed(0)+'%' : 'nuevo';
+    const topProj = Object.entries(d.proyectos)
+      .sort((a,b) => Math.abs(b[1]) - Math.abs(a[1]))
+      .slice(0,3)
+      .map(([p,v]) => p.split(' - ')[0]+':'+fmtM(v,false))
+      .join(' | ');
+    return `  ${cta} | A:${fmtM(v1,false)} B:${fmtM(v2,false)} var:${fmtM(diff)}(${pct}) | [${topProj}]`;
+  }).join('\n');
+
+  // ── 2. Cuentas con variación brusca (alertas automáticas)
+  const cambiosBruscos = Object.entries(c1)
+    .filter(([cta]) => c2[cta])
+    .map(([cta, d]) => {
+      const v1 = d.total, v2 = (c2[cta]||{}).total||0;
+      const pct = v2 ? Math.abs((v1-v2)/Math.abs(v2))*100 : 0;
+      return { cta, v1, v2, diff: v1-v2, pct };
+    })
+    .filter(x => x.pct > 50 && Math.abs(x.diff)/1e6 > 5)
+    .sort((a,b) => Math.abs(b.diff) - Math.abs(a.diff))
+    .slice(0, 12)
+    .map(x => `  ⚠ ${x.cta}: A=${fmtM(x.v1,false)} B=${fmtM(x.v2,false)} var=${fmtM(x.diff)} (${x.pct.toFixed(0)}%)`)
+    .join('\n');
+
+  // ── 3. Costos por proyecto y cuenta — para detectar traslados entre proyectos
+  //    Agrupa costos por (proyecto, cuenta) y detecta patrones inusuales
+  const costByProjCta = {};
+  r1.filter(r => !isIngreso(r)).forEach(r => {
+    const proj = (r['Ceco / Proyecto']||'').toString().trim();
+    const cta  = (r['Cuenta Descripción']||'').toString().trim();
+    const key  = proj + '|||' + cta;
+    const v    = displayVal(r);
+    costByProjCta[key] = (costByProjCta[key]||0) + v;
+  });
+  const costByProjCta2 = {};
+  r2.filter(r => !isIngreso(r)).forEach(r => {
+    const proj = (r['Ceco / Proyecto']||'').toString().trim();
+    const cta  = (r['Cuenta Descripción']||'').toString().trim();
+    const key  = proj + '|||' + cta;
+    const v    = displayVal(r);
+    costByProjCta2[key] = (costByProjCta2[key]||0) + v;
+  });
+
+  // Detectar variaciones >100% en combinación proyecto+cuenta (señal de traslado)
+  const traslados = Object.entries(costByProjCta)
+    .filter(([key]) => costByProjCta2[key])
+    .map(([key, v1]) => {
+      const v2   = costByProjCta2[key]||0;
+      const diff = v1 - v2;
+      const pct  = v2 ? Math.abs(diff/Math.abs(v2))*100 : 0;
+      const [proj, cta] = key.split('|||');
+      return { proj: proj.split(' - ')[0], cta, v1, v2, diff, pct };
+    })
+    .filter(x => x.pct > 100 && Math.abs(x.diff)/1e6 > 3)
+    .sort((a,b) => Math.abs(b.diff) - Math.abs(a.diff))
+    .slice(0, 10)
+    .map(x => `  ${x.proj} | ${x.cta} | A:${fmtM(x.v1,false)} B:${fmtM(x.v2,false)} var:${x.pct.toFixed(0)}%`)
+    .join('\n');
+
+  // ── 4. Asientos individuales destacados (>10M o tipo inusual)
+  //    Para auditoría y preguntas forenses
+  const asientosDestacados = r1
+    .filter(r => {
+      const v = Math.abs(displayVal(r));
+      const tipo = (r['Tipo de asiento']||'').toString().trim();
+      return v/1e6 >= 10 || ['NC','ND','AJ','RV'].includes(tipo);
+    })
+    .sort((a,b) => Math.abs(displayVal(b)) - Math.abs(displayVal(a)))
+    .slice(0, 50)
+    .map(r => {
+      const v    = displayVal(r);
+      const tipo = (r['Tipo de asiento']||'').toString().trim();
+      const no   = (r['N° Asiento']||'').toString().trim();
+      const terc = (r['Tercero']||'').toString().trim().substring(0,35);
+      const proj = (r['Ceco / Proyecto']||'').toString().trim().split(' - ')[0];
+      const cta  = (r['Cuenta Descripción']||'').toString().trim().substring(0,40);
+      const desc = (r['Descripción']||'').toString().trim().substring(0,30);
+      const per  = (r['Periodo']||'').toString().trim();
+      return `  Asiento:${no} | ${per} | ${tipo} | ${terc} | ${proj} | ${cta} | "${desc}" | ${fmtM(v,false)}`;
+    }).join('\n');
+
+  return `
+=== DETALLE POR CUENTA CONTABLE PUC (Top 40) ===
+Formato: Cuenta | A | B | Variación | [Proyectos principales]
+${cuentaLines||'  (sin datos)'}
+
+=== CUENTAS CON VARIACIÓN BRUSCA >50% y >5M ===
+${cambiosBruscos||'  Ninguna detectada'}
+
+=== VARIACIONES INUSUALES POR PROYECTO+CUENTA (posibles traslados) ===
+Variaciones >100% en una combinación específica proyecto+cuenta (señal de reclasificación o traslado de costos):
+${traslados||'  No se detectaron variaciones inusuales por proyecto+cuenta'}
+
+=== ASIENTOS DESTACADOS (>10M o tipo NC/ND/AJ/RV) ===
+Formato: Asiento | Periodo | Tipo | Tercero | Proyecto | Cuenta | Descripción | Valor
+${asientosDestacados||'  (sin asientos destacados)'}`;
+}
+
+
 function sendChat(){
   if(_chatLoading) return;
   const ta=document.getElementById('ai-chat-input');
@@ -2183,18 +2263,35 @@ function sendChat(){
 
   // Usar buildAIPrompt() como contexto completo del chat
   // Tiene todos los datos: gastos admin, terceros, WIP, proyectos, costos huerfanos
+  // Obtener datos de entidad filtrada para buildCuentasContext
+  const{r1all:_r1all, r2all:_r2all, labelA:_lA, labelB:_lB} = _state;
+  const _r1 = filterByEntity(_r1all, currentEntity, currentConsorcio);
+  const _r2 = filterByEntity(_r2all, currentEntity, currentConsorcio);
+
   let sysPrompt = '';
   try {
     sysPrompt = buildAIPrompt();
+    // Agregar contexto de cuentas PUC, traslados y asientos destacados
+    try { sysPrompt += buildCuentasContext(_r1, _r2, _lA, _lB); } catch(e2) { console.warn('buildCuentasContext error:', e2); }
     // Reemplazar instruccion de JSON al final por instruccion de chat libre
     const jsonIdx = sysPrompt.lastIndexOf('RESPONDE ÚNICAMENTE con este JSON');
     if(jsonIdx > 0){
       sysPrompt = sysPrompt.slice(0, jsonIdx) +
-        'Responde de forma conversacional y directa. ' +
-        'Usa cifras concretas de los datos. ' +
-        'Montos en formato 450M (millones) o 23.5B (billones COP). ' +
-        'Si algo es critico usa ⚠. Si es positivo usa ✅. ' +
-        'Usa bullets cuando ayuden. Maximo 300 palabras por respuesta.';
+        'Eres el analista financiero y auditor interno de ISES. ' +
+        'TIENES ACCESO COMPLETO A: todos los rubros ERI por proyecto y tercero, ' +
+        'asientos individuales con numero tipo tercero cuenta PUC y descripcion, ' +
+        'top 40 cuentas PUC con variaciones por proyecto, ' +
+        'variaciones inusuales por proyecto+cuenta para detectar traslados de costos, ' +
+        'y asientos destacados mayores a 10M o tipo NC ND AJ RV. ' +
+        'RESPONDE CUALQUIER PREGUNTA desde basica como cuanto fue el ingreso del mes, ' +
+        'hasta forense como si hubo traslado de costos entre proyectos, ' +
+        'depreciacion anomala en cuentas 7460, manipulacion de margen por reclasificacion, ' +
+        'o terceros sospechosos que cambiaron de NIT. ' +
+        'Cuando pregunten por cuentas especificas busca en el detalle de cuentas PUC. ' +
+        'Cuando sospechen traslados analiza variaciones inusuales proyecto+cuenta. ' +
+        'Cita numeros de asiento cuando sean relevantes. ' +
+        'Responde directo con cifras concretas en 450M millones o 23.5B billones COP. ' +
+        'Riesgo con simbolo de alerta. Positivo con simbolo check. Maximo 500 palabras.';
     }
   } catch(e) {
     sysPrompt = 'Eres analista financiero de ISES. Responde en espanol con cifras concretas.';
@@ -2211,7 +2308,7 @@ function sendChat(){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
       model:'claude-sonnet-4-6',
-      max_tokens:2000,
+      max_tokens:2500,
       system: sysPrompt,
       messages: history
     })
@@ -2641,14 +2738,23 @@ IMPORTANTE: Llega al nivel más bajo posible. Si un gasto subió, di exactamente
 RESUMEN (4-5 oraciones): Narrativa ejecutiva. Empieza con resultado neto y margen. Factor dominante del periodo. ¿Es crecimiento/caída estructural o puntual? Señal más importante para la gerencia.
 
 HALLAZGOS — exactamente 4, uno por sección, CON DETALLE DE TERCEROS Y CONCEPTOS:
-1. INGRESOS: Agrupa proyectos en Nuevos / Crecen / Caen / Desaparecen. Para cada uno: ¿es conversión WIP→factura (no es ingreso nuevo) o es actividad real nueva? ¿Qué cliente o contrato lo explica?
-2. COSTOS Y EFICIENCIA: ¿Costos se mueven con ingresos? ¿Hay costos huérfanos? ¿Qué terceros generaron los mayores movimientos en costo directo? ¿El margen bruto de proyectos clave es sostenible?
-3. GASTOS ADMINISTRATIVOS — MUY DETALLADO: ¿Cuánto representa de los ingresos? ¿Qué área creció más? ¿Qué terceros específicos generaron el incremento? ¿Son recurrentes o nuevos? ¿Hay gastos de personal vs servicios vs otros? ¿Hay movimientos atípicos o no recurrentes?
-4. MARGEN Y RIESGOS: Calidad del margen. Proyectos que destruyen valor. ¿Es sostenible o depende de proyectos puntuales? ¿Hay gastos extraordinarios que distorsionan el resultado?
+1. INGRESOS: Agrupa proyectos en Nuevos / Crecen / Caen / Desaparecen. Para cada uno: ¿es conversión WIP→factura o actividad real nueva? ¿Qué cliente/contrato lo explica? ¿Hay concentración en un solo proyecto (>30% del ingreso)?
+2. COSTOS Y EFICIENCIA: ¿Los costos crecen en la misma proporción que los ingresos? Si no, ¿por qué? ¿Hay costos huérfanos? ¿Qué terceros mueven el costo? ¿Hay subcontratación atípica? ¿Algún proyecto pierde margen mientras otro lo gana con los mismos tipos de costo (posible traslado)?
+3. GASTOS ADMINISTRATIVOS — PROFUNDO: Peso sobre ingresos y tendencia. Por área: ¿cuál creció más y por qué? Por tercero: ¿quién cobra más y es recurrente o nuevo? ¿Hay servicios que reemplazaron a otro proveedor desaparecido (mismo monto, distinto NIT)? ¿Personal vs servicios vs otros?
+4. MARGEN, PATRONES Y RIESGOS: Calidad del margen (¿depende de proyectos puntuales o es estructural?). Proyectos que destruyen valor. Señales de manipulación: WIP creciente con facturación estancada, reclasificaciones entre proyectos, gastos extraordinarios disfrazados de operativos. ¿El resultado del período es sostenible?
 
-ALERTAS (2-5): Usa los criterios críticos. Cada alerta: nombre proyecto/tercero/rubro + cifra exacta + riesgo concreto + urgencia.
+DETECCIÓN DE PATRONES — busca activamente:
+- Proyectos con ingreso que cae y costo que no cae → erosión de margen
+- Terceros nuevos con montos similares a terceros desaparecidos → posible cambio de NIT fraudulento
+- Proyectos donde el WIP sube pero la facturación no → posible disputa contractual o retraso
+- Gastos de un proyecto que migran a otro → traslado de costos para mejorar margen aparente
 
-RECOMENDACIONES (3-4): Acción concreta + responsable sugerido + plazo orientativo.
+ALERTAS (3-6): Prioriza por impacto. Formato: [🔴/🟡/ℹ️] Descripción + cifra exacta + riesgo concreto.
+🔴 CRÍTICO: margen negativo en proyecto real, costo huérfano >5M, caída >30% cliente clave, tercero nuevo >50M.
+🟡 ALTO: gastos admin >12% ingresos, WIP >15% ingresos, concentración >40% un proyecto, variación inusual cuenta PUC.
+ℹ️ INFO: variaciones que merecen seguimiento aunque no sean críticas.
+
+RECOMENDACIONES (3-4): Acción específica + área responsable + plazo concreto.
 
 RESPONDE ÚNICAMENTE con este JSON sin texto adicional ni markdown:
 {"resumen":"narrativa ejecutiva 4-5 oraciones","hallazgos":["1. INGRESOS — detalle completo con proyectos, clientes y análisis WIP","2. COSTOS — eficiencia, costos huérfanos, terceros clave","3. GASTOS ADMINISTRATIVOS — detalle por área, tercero, concepto y recurrencia","4. MARGEN Y RIESGOS — calidad, sostenibilidad, distorsiones"],"alertas":["alerta con tercero/proyecto/cifra y riesgo concreto","alerta 2","alerta 3"],"recomendaciones":["acción + responsable + plazo","rec 2","rec 3"]}`;
